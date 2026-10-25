@@ -1,0 +1,11 @@
+[Unit]
+Description=BOOTH Free Radar 12-hour catalog and outbound snapshot publisher
+
+[Timer]
+OnBootSec=10min
+OnUnitInactiveSec=12h
+AccuracySec=1s
+Unit=booth-free-radar.service
+
+[Install]
+WantedBy=timers.target

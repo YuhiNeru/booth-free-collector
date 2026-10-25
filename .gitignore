@@ -1,0 +1,8 @@
+bin/
+obj/
+dist/
+state/
+.tools/
+.wrangler/
+*.user
+*.secret
