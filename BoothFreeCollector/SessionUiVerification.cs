@@ -53,6 +53,7 @@ internal static class SessionUiVerification
                 {
                     dependencyGate = heldDependency;
                     Task pendingDependency = form.VerifyDependencyForTest();
+                    Check(form.LibraryCheckingForVerification, "library check immediately shows checking and disables duplicate clicks before slow work completes");
                     try
                     {
                         Check(form.MeasurePresentationForVerification(output), "time and status updates preserve the queue binding, selection and screen position");
@@ -61,6 +62,8 @@ internal static class SessionUiVerification
                     }
                     finally { heldDependency.Set(); }
                     await pendingDependency; dependencyGate = null;
+                    Check(!form.LibraryCheckingForVerification && form.LibraryStatusForVerification.Contains("テスト用の公式ライブラリ確認"),
+                        "library check replaces checking with its result as soon as dependency work finishes");
                 }
                 using (var image = new Bitmap(form.Width, form.Height))
                 { form.DrawToBitmap(image, new Rectangle(0, 0, form.Width, form.Height)); image.Save(Path.Combine(output, "login-notice.png")); }

@@ -21,7 +21,8 @@ public sealed class MainForm : Form
     readonly Func<LibraryRequirement>? testRequirement;
     internal Func<Task>? BeforeForgetForVerification;
     Task? sessionInitialization;
-    bool libraryReady;
+    bool libraryReady, libraryChecking;
+    Task<bool>? libraryCheckTask;
     readonly NotifyIcon tray;
     readonly System.Windows.Forms.Timer timer = new() { Interval = 30000 };
     readonly Label status = new() { Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
@@ -337,34 +338,61 @@ public sealed class MainForm : Form
         actions.Controls.Add(logoutButton);
         top.Controls.Add(actions); page.Controls.Add(session.LoginView); page.Controls.Add(top); tabs.TabPages.Add(page);
     }
-    async Task<bool> CheckLibrary()
+    Task<bool> CheckLibrary() => libraryCheckTask ??= CheckLibraryCore();
+    async Task<bool> CheckLibraryCore()
     {
-        if (testRequirement is null && !ManagerIntegration.IsAvailable())
-        {
-            try { managerLauncher.TryStart(settings); }
-            catch (IOException ex) { setupLibraryStatus.Text = ex.Message; }
-        }
-        var requirement = await Task.Run(() => testRequirement is not null ? testRequirement() : OfficialLibraryRequirement.Check());
-        if (testRequirement is null) requirement = managerLauncher.Confirm(requirement);
-        if (requirement.Ready && testRequirement is null)
-        {
-            string path = ManagerIntegration.RunningExecutable();
-            if (settings.OfficialManagerExecutable != path) { settings.OfficialManagerExecutable = path; Storage.Save("settings.json", settings); }
-        }
-        libraryReady = requirement.Ready;
-        confirmedFolder = requirement.Ready ? requirement.Folder : null;
-        setupLibraryStatus.Text = "① " + requirement.Message;
-        setupLibraryStatus.ForeColor = libraryReady ? CollectorTheme.Success : CollectorTheme.Warning;
+        libraryChecking = true;
+        setupLibraryStatus.Text = "① 公式ライブラリを確認中…";
+        setupLibraryStatus.ForeColor = CollectorTheme.Muted;
+        if (libraryCheckButton is not null) libraryCheckButton.Text = "確認中…";
         RefreshSessionActions();
-        if (!libraryReady) { session.Suspend(); state.Status = requirement.Message; }
-        else session.Resume();
-        return libraryReady;
+        // Yield before any filesystem/process work so the checking state can paint.
+        await Task.Yield();
+        try
+        {
+            var requirement = await Task.Run(async () =>
+            {
+                if (testRequirement is not null) return testRequirement();
+                bool started = managerLauncher.TryStart(settings);
+                var elapsed = Stopwatch.StartNew();
+                LibraryRequirement result;
+                do
+                {
+                    result = managerLauncher.Confirm(OfficialLibraryRequirement.Check());
+                    if (result.Ready || !result.Retryable || elapsed.ElapsedMilliseconds >= (started ? 5000 : 600)) break;
+                    await Task.Delay(200);
+                } while (true);
+                return result;
+            });
+            if (requirement.Ready && requirement.Executable is string path && settings.OfficialManagerExecutable != path)
+            { settings.OfficialManagerExecutable = path; Storage.Save("settings.json", settings); }
+            libraryReady = requirement.Ready;
+            confirmedFolder = requirement.Ready ? requirement.Folder : null;
+            setupLibraryStatus.Text = "① " + requirement.Message;
+            setupLibraryStatus.ForeColor = libraryReady ? CollectorTheme.Success : CollectorTheme.Warning;
+            if (!libraryReady) { session.Suspend(); state.Status = requirement.Message; }
+            else session.Resume();
+            return libraryReady;
+        }
+        catch
+        {
+            libraryReady = false; confirmedFolder = null; session.Suspend();
+            setupLibraryStatus.Text = "① 公式ライブラリを確認できません。もう一度確認してください";
+            setupLibraryStatus.ForeColor = CollectorTheme.Warning;
+            throw;
+        }
+        finally
+        {
+            libraryChecking = false; libraryCheckTask = null;
+            if (libraryCheckButton is not null) libraryCheckButton.Text = "① 公式ライブラリを確認";
+            RefreshSessionActions();
+        }
     }
     void RefreshSessionActions()
     {
-        if (libraryCheckButton is not null) libraryCheckButton.Enabled = !busy && !setupBusy;
-        foreach (var action in sessionActions) action.Enabled = libraryReady && !busy && !setupBusy;
-        if (logoutButton is not null) logoutButton.Enabled = !busy && !setupBusy && (session.Ready || Directory.Exists(session.ProfileFolder));
+        if (libraryCheckButton is not null) libraryCheckButton.Enabled = !busy && !setupBusy && !libraryChecking;
+        foreach (var action in sessionActions) action.Enabled = libraryReady && !busy && !setupBusy && !libraryChecking;
+        if (logoutButton is not null) logoutButton.Enabled = !busy && !setupBusy && !libraryChecking && (session.Ready || Directory.Exists(session.ProfileFolder));
     }
     async Task SetupAction(Func<Task> action)
     {
@@ -468,6 +496,8 @@ public sealed class MainForm : Form
         for (int i = 0; i < 50 && !Visible; i++) await Task.Delay(20);
         return Visible;
     }
+    internal bool LibraryCheckingForVerification => libraryChecking && setupLibraryStatus.Text.Contains("確認中") && libraryCheckButton?.Text == "確認中…" && !libraryCheckButton.Enabled;
+    internal string LibraryStatusForVerification => setupLibraryStatus.Text;
     internal EmbeddedSession VerificationSession => session;
     internal async Task VerifyDependencyForTest()
     {

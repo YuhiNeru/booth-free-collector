@@ -73,22 +73,25 @@ public static class ManagerIntegration
     }
     public static string RunningExecutable()
     {
-        var found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var visible = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var process in Process.GetProcessesByName("booth_library_manager_client"))
+        var processes = Process.GetProcessesByName("booth_library_manager_client");
+        try
         {
-            using (process)
+            var candidates = new List<(Process Process, string Path)>();
+            foreach (var process in processes)
             {
                 string? path = process.MainModule?.FileName;
-                if (path is not null && File.Exists(path))
-                {
-                    found.Add(path);
-                    if (process.MainWindowHandle != IntPtr.Zero) visible.Add(path);
-                }
+                if (path is not null && File.Exists(path)) candidates.Add((process, path));
             }
+            var found = candidates.Select(p => p.Path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            // Helper processes normally share one executable. Enumerating all
+            // desktop windows is only needed to resolve different installations.
+            if (found.Length == 1) return found[0];
+            var visible = candidates.Where(p => p.Process.MainWindowHandle != IntPtr.Zero).Select(p => p.Path);
+            return SelectExecutable(found, visible);
         }
-        return SelectExecutable(found, visible);
+        finally { foreach (var process in processes) process.Dispose(); }
     }
+
     internal static string SelectExecutable(IEnumerable<string> running, IEnumerable<string> visible)
     {
         var windows = visible.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();

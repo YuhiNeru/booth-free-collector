@@ -96,16 +96,27 @@ public sealed class ActiveLibraryDatabase : IDisposable
                 size = Math.Max(size * 2, needed + 65536);
             }
             long count = Marshal.ReadIntPtr(data).ToInt64(); int stride = Marshal.SizeOf<Entry>();
+            // Read only the process-id field for unrelated handles. Parsing
+            // every entry once per official process was needlessly expensive.
+            int processOffset = Marshal.OffsetOf<Entry>(nameof(Entry.ProcessId)).ToInt32();
+            var handles = new Dictionary<int, List<Entry>>();
+            for (long i = 0; i < count; i++)
+            {
+                int offset = checked(IntPtr.Size * 2 + (int)(i * stride));
+                long owner = Marshal.ReadIntPtr(data, offset + processOffset).ToInt64();
+                if (owner < 0 || owner > int.MaxValue || !pids.Contains((int)owner)) continue;
+                if (!handles.TryGetValue((int)owner, out var entries)) handles[(int)owner] = entries = [];
+                entries.Add(Marshal.PtrToStructure<Entry>(data + offset));
+            }
             foreach (int pid in pids)
             {
                 IntPtr process = OpenProcess(0x40, false, pid);
                 if (process == IntPtr.Zero) continue;
                 try
                 {
-                    for (long i = 0; i < count; i++)
+                    foreach (var item in handles.GetValueOrDefault(pid) ?? [])
                     {
-                        var item = Marshal.PtrToStructure<Entry>(data + checked(IntPtr.Size * 2 + (int)(i * stride)));
-                        if (item.ProcessId != (nuint)pid || !DuplicateHandle(process, (IntPtr)item.Handle, GetCurrentProcess(), out var handle, 0, false, 2)) continue;
+                        if (!DuplicateHandle(process, (IntPtr)item.Handle, GetCurrentProcess(), out var handle, 0, false, 2)) continue;
                         using (handle)
                         {
                             if (GetFileType(handle) != 1) continue;
