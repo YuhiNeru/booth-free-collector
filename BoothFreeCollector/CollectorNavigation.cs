@@ -86,15 +86,15 @@ internal sealed class CollectorNavigation : UserControl
     }
     internal void ApplyPalette()
     {
-        rail.BackColor = Color.FromArgb(23, 23, 26); links.BackColor = rail.BackColor;
+        rail.BackColor = Color.FromArgb(18, 28, 38); links.BackColor = rail.BackColor;
         for (int i = 0; i < buttons.Count; i++)
         {
             var button = buttons[i];
             button.UseVisualStyleBackColor = false; button.FlatAppearance.BorderSize = 0;
-            button.BackColor = i == selectedIndex ? Color.FromArgb(60, 35, 45) : rail.BackColor;
+            button.BackColor = i == selectedIndex ? Color.FromArgb(25, 52, 73) : rail.BackColor;
             button.ForeColor = i == selectedIndex ? CollectorTheme.Text : CollectorTheme.Muted;
-            button.FlatAppearance.MouseOverBackColor = Color.FromArgb(39, 39, 45);
-            button.FlatAppearance.MouseDownBackColor = Color.FromArgb(60, 35, 45);
+            button.FlatAppearance.MouseOverBackColor = Color.FromArgb(29, 46, 61);
+            button.FlatAppearance.MouseDownBackColor = Color.FromArgb(25, 52, 73);
         }
     }
     sealed class Pages(CollectorNavigation owner) : Collection<Control>

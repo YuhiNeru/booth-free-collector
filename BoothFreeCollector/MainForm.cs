@@ -34,11 +34,11 @@ public sealed class MainForm : Form
     (string Id, string Title, string Shop)[] displayedRows = [];
     string? confirmedFolder;
     readonly Label libraryFolderStatus = new() { AutoSize = true, MaximumSize = new Size(850, 0) };
-    readonly CheckBox auto = new() { Text = "新着の無料ファイルを自動ダウンロード", AutoSize = true };
-    readonly CheckBox adult = new() { Text = "成人向け・年齢区分不明も対象にする（18歳以上）", AutoSize = true };
-    readonly CheckBox existing = new() { Text = "初回に既存の無料商品も対象にする（大量のファイルを取得します）", AutoSize = true };
-    readonly CheckBox startup = new() { Text = "Windows ログイン時に常駐する", AutoSize = true };
-    readonly CheckBox startManager = new() { Text = "必要なとき公式ライブラリを自動起動する", AutoSize = true };
+    readonly CheckBox auto = new CollectorCheckBox() { Text = "新着の無料ファイルを自動ダウンロード", AutoSize = true };
+    readonly CheckBox adult = new CollectorCheckBox() { Text = "成人向け・年齢区分不明も対象にする（18歳以上）", AutoSize = true };
+    readonly CheckBox existing = new CollectorCheckBox() { Text = "初回に既存の無料商品も対象にする（大量のファイルを取得します）", AutoSize = true };
+    readonly CheckBox startup = new CollectorCheckBox() { Text = "Windows ログイン時に常駐する", AutoSize = true };
+    readonly CheckBox startManager = new CollectorCheckBox() { Text = "必要なとき公式ライブラリを自動起動する", AutoSize = true };
     readonly TextBox search = new() { Width = 500, PlaceholderText = "例: 衣装 Unity（スペース区切りでAND）" };
     readonly Dictionary<string, CheckBox> categoryChecks = [];
     readonly List<Control> explanations = [];
@@ -49,6 +49,12 @@ public sealed class MainForm : Form
     CancellationTokenSource cancellation = new();
     bool busy, exiting;
     readonly bool startHidden;
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        CollectorTheme.ApplyWindow(this);
+    }
 
     public MainForm(bool startHidden, Func<LibraryRequirement>? testRequirement = null)
     {
@@ -63,7 +69,7 @@ public sealed class MainForm : Form
         Text = "BOOTH Free Downloader"; Width = 1120; Height = 840; MinimumSize = new Size(960, 720);
         DoubleBuffered = true;
         Font = new Font("Yu Gothic UI", 10); StartPosition = FormStartPosition.CenterScreen;
-        Icon = SystemIcons.Application;
+        Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application;
         downloadQueue = new(session);
         BuildUi();
         CollectorTheme.Apply(this);
@@ -179,7 +185,7 @@ public sealed class MainForm : Form
         layout.Controls.Add(Hint("保存先は公式ライブラリの設定で変更できます。変更は自動で反映されます。"));
         layout.Controls.Add(Label("取得する商品")); layout.Controls.Add(auto); layout.Controls.Add(adult); layout.Controls.Add(existing);
         layout.Controls.Add(Label("キーワード（商品名・ショップ・タグ）")); layout.Controls.Add(search);
-        layout.Controls.Add(Hint("カテゴリは「ダウンロード対象」タブで選択できます。"));
+        layout.Controls.Add(Hint("カテゴリは「ダウンロード対象」画面で選択できます。"));
         layout.Controls.Add(Label("配信URL")); layout.Controls.Add(endpoint);
         layout.Controls.Add(startup);
         layout.Controls.Add(startManager);
@@ -200,7 +206,7 @@ public sealed class MainForm : Form
         panel.Controls.Add(Hint("初期設定は衣装・髪型のみです。チェックをすべて外すと取得しません。変更後は下のボタンで保存してください。"));
         foreach (string priority in new[] { "高", "中", "低" })
         {
-            var group = new CheckBox { Text = "優先度：" + priority + "（まとめて選択）", AutoSize = true, ThreeState = true, AutoCheck = false, Margin = new Padding(0, 20, 0, 6) };
+            var group = new CollectorCheckBox { Text = "優先度：" + priority + "（まとめて選択）", AutoSize = true, ThreeState = true, AutoCheck = false, Margin = new Padding(0, 20, 0, 6) };
             var children = new List<CheckBox>();
             bool syncing = false;
             void Sync()
@@ -212,7 +218,7 @@ public sealed class MainForm : Form
             panel.Controls.Add(group);
             foreach (var item in DownloadCategories.All.Where(c => c.Priority == priority))
             {
-                var check = new CheckBox { Text = item.Label, AutoSize = true, Checked = settings.DownloadCategories.Contains(item.Id), Margin = new Padding(26, 3, 0, 3) };
+                var check = new CollectorCheckBox { Text = item.Label, AutoSize = true, Checked = settings.DownloadCategories.Contains(item.Id), Margin = new Padding(26, 3, 0, 3) };
                 categoryChecks[item.Id] = check; children.Add(check); panel.Controls.Add(check);
                 check.CheckedChanged += (_, _) => { if (!syncing) Sync(); };
             }
