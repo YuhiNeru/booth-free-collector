@@ -9,147 +9,195 @@ public sealed class MainForm : Form
     readonly Settings settings;
     readonly CollectorState state;
     readonly FeedClient feed = new();
-    readonly BridgeServer bridge;
-    readonly DirectFileTransfer directFiles = new();
+    readonly EmbeddedSession session = new();
+    readonly SessionDownloadQueue downloadQueue;
+    readonly OfficialManagerLauncher managerLauncher = new();
+    readonly Label loginStatus = new() { AutoSize = true, Text = "ログイン未確認" };
+    readonly Label setupLibraryStatus = new() { AutoSize = true, Text = "① 公式ライブラリを確認してください", MaximumSize = new Size(850, 0) };
+    readonly List<Control> sessionActions = [];
+    Button? logoutButton;
+    Button? libraryCheckButton;
+    bool setupBusy;
+    readonly Func<LibraryRequirement>? testRequirement;
+    internal Func<Task>? BeforeForgetForVerification;
+    Task? sessionInitialization;
+    bool libraryReady;
     readonly NotifyIcon tray;
     readonly System.Windows.Forms.Timer timer = new() { Interval = 30000 };
-    readonly Label status = new() { AutoSize = true, MaximumSize = new Size(850, 0) };
-    readonly Label schedule = new() { AutoSize = true };
-    readonly Label folderLabel = new() { AutoSize = true, MaximumSize = new Size(850, 0) };
+    readonly Label status = new() { Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
+    readonly Label schedule = new() { Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
+    readonly Label folderLabel = new() { Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
     readonly ListBox events = new() { Dock = DockStyle.Fill, HorizontalScrollbar = true };
-    readonly DataGridView grid = new() { Dock = DockStyle.Fill, ReadOnly = true, AutoGenerateColumns = false, AllowUserToAddRows = false, RowHeadersVisible = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect, MultiSelect = false };
-    readonly TabControl tabs = new() { Dock = DockStyle.Fill };
-    readonly CheckBox follow = new() { Text = "Library Manager の保存先に自動追従する（後からインストールした場合も）", AutoSize = true };
+    readonly DataGridView grid = new CollectorGrid { Dock = DockStyle.Fill, ReadOnly = true, AutoGenerateColumns = false, AllowUserToAddRows = false, RowHeadersVisible = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect, MultiSelect = false };
+    readonly CollectorNavigation tabs = new() { Dock = DockStyle.Fill };
+    readonly Label emptyQueue = new() { Dock = DockStyle.Fill, Text = "待機中の商品はありません", TextAlign = ContentAlignment.MiddleCenter };
+    (string Id, string Title, string Shop)[] displayedRows = [];
+    string? confirmedFolder;
     readonly Label libraryFolderStatus = new() { AutoSize = true, MaximumSize = new Size(850, 0) };
-    string fixedFolderDraft;
-    readonly TextBox folder = new() { Width = 600 };
     readonly CheckBox auto = new() { Text = "新着の無料ファイルを自動ダウンロード", AutoSize = true };
     readonly CheckBox adult = new() { Text = "成人向け・年齢区分不明も対象にする（18歳以上）", AutoSize = true };
     readonly CheckBox existing = new() { Text = "初回に既存の無料商品も対象にする（大量のファイルを取得します）", AutoSize = true };
     readonly CheckBox startup = new() { Text = "Windows ログイン時に常駐する", AutoSize = true };
-    readonly CheckBox browserHandoff = new() { Text = "Windows単体時は既定ブラウザへ自動で受け渡す（画面が開く場合があります）", AutoSize = true };
+    readonly CheckBox startManager = new() { Text = "必要なとき公式ライブラリを自動起動する", AutoSize = true };
     readonly TextBox search = new() { Width = 500, PlaceholderText = "例: 衣装 Unity（スペース区切りでAND）" };
     readonly Dictionary<string, CheckBox> categoryChecks = [];
+    readonly List<Control> explanations = [];
+    readonly Button explanationToggle = new CollectorButton { Name = "explanationToggle", AccessibleName = "説明文の表示切り替え", AutoSize = false, Size = new Size(120, 36), Anchor = AnchorStyles.Top | AnchorStyles.Right };
+    readonly List<Button> primaryButtons = [];
+    Button? resumeButton, pauseButton;
     readonly TextBox endpoint = new() { Width = 700 };
-    DownloadEngine engine;
     CancellationTokenSource cancellation = new();
     bool busy, exiting;
     readonly bool startHidden;
 
-    public MainForm(bool startHidden)
+    public MainForm(bool startHidden, Func<LibraryRequirement>? testRequirement = null)
     {
+        if (testRequirement is not null && Environment.GetEnvironmentVariable("BOOTH_COLLECTOR_TEST_STATE") is null) throw new InvalidOperationException("テスト専用の依存関係です");
+        this.testRequirement = testRequirement;
         this.startHidden = startHidden;
         settings = Storage.Load<Settings>("settings.json");
-        fixedFolderDraft = settings.DownloadFolder;
+        if (Environment.GetEnvironmentVariable("BOOTH_COLLECTOR_TEST_STATE") is null) settings.FollowLibraryFolder = true;
         state = Storage.Load<CollectorState>("state.json");
-        Text = "BOOTH Free Collector"; Width = 1030; Height = 770; MinimumSize = new Size(850, 650);
+        DownloadScheduler.Reconcile(state, settings, DateTimeOffset.UtcNow);
+        Storage.Save("state.json", state);
+        Text = "BOOTH Free Downloader"; Width = 1120; Height = 840; MinimumSize = new Size(960, 720);
+        DoubleBuffered = true;
         Font = new Font("Yu Gothic UI", 10); StartPosition = FormStartPosition.CenterScreen;
         Icon = SystemIcons.Application;
-        engine = new(Log);
-        bridge = new(DispatchBridge);
+        downloadQueue = new(session);
         BuildUi();
+        CollectorTheme.Apply(this);
+        tabs.ApplyPalette();
+        emptyQueue.ForeColor = CollectorTheme.Muted;
+        foreach (var primary in primaryButtons) CollectorTheme.Primary(primary);
+        foreach (var hint in explanations) hint.ForeColor = CollectorTheme.Muted;
+        ApplyExplanationVisibility();
+        Controls.Add(session.Worker);
+        session.Changed += () => { loginStatus.Text = session.NeedsLogin ? "ログイン・アクセス確認が必要です" : "アプリ専用のログイン状態を確認しました"; UpdateView(); };
         var menu = new ContextMenuStrip();
         menu.Items.Add("開く", null, (_, _) => ShowApp());
         menu.Items.Add("終了", null, (_, _) => { exiting = true; Close(); });
-        tray = new NotifyIcon { Icon = Icon, Text = "BOOTH Free Collector", Visible = true, ContextMenuStrip = menu };
+        tray = new NotifyIcon { Icon = Icon, Text = "BOOTH Free Downloader", Visible = true, ContextMenuStrip = menu };
         tray.DoubleClick += (_, _) => ShowApp();
         timer.Tick += async (_, _) => await Tick();
         Shown += async (_, _) =>
         {
+            setupBusy = true; RefreshSessionActions();
             try
             {
-                await engine.Initialize(); BrowserBridge.Register(); bridge.Start(); timer.Start();
-                if (!settings.Configured) { tabs.SelectedIndex = 1; ShowApp(); }
-                else { if (startHidden) Hide(); else ShowApp(); await Tick(); }
+                BrowserBridge.Unregister(); timer.Start();
+                if (await CheckLibrary())
+                {
+                    await EnsureSession();
+                    if (settings.DedicatedSessionEnabled) await session.CheckLoginAsync(CancellationToken.None);
+                    if (settings.SetupCompleted && !session.NeedsLogin && !Storage.Load<SessionImportVerification>("session-import-verification.json").PagePlanVerified)
+                        await VerifyImportConnection();
+                    if (settings.DedicatedSessionEnabled && session.NeedsLogin) session.OpenLogin();
+                }
+                if (!settings.Configured || !settings.SetupCompleted) { tabs.SelectedIndex = tabs.TabPages.Count - 1; ShowApp(); }
+                else
+                {
+                    if (!libraryReady || !settings.SetupCompleted || session.NeedsLogin) { tabs.SelectedIndex = tabs.TabPages.Count - 1; ShowApp(); }
+                    else if (startHidden) Hide(); else ShowApp();
+                }
             }
-            catch (Exception ex) { Log("起動エラー: " + ex.Message); status.Text = "起動設定を確認してください"; }
+            catch (Exception) { status.Text = "起動設定を確認してください"; loginStatus.Text = "ログイン画面を準備できません。WebView2 Runtimeを確認してください"; tabs.SelectedIndex = tabs.TabPages.Count - 1; ShowApp(); }
+            finally { setupBusy = false; RefreshSessionActions(); }
+            if (settings.Configured && settings.SetupCompleted) await Tick();
         };
         FormClosing += (_, e) =>
         {
             if (!exiting) { e.Cancel = true; Hide(); return; }
-            timer.Stop(); cancellation.Cancel(); engine.Stop(); tray.Visible = false;
+            timer.Stop(); cancellation.Cancel(); tray.Visible = false;
         };
-        FormClosed += (_, _) => { directFiles.Dispose(); bridge.Dispose(); engine.Dispose(); tray.Dispose(); feed.Dispose(); cancellation.Dispose(); };
+        FormClosed += (_, _) => { session.Dispose(); managerLauncher.Dispose(); tray.Dispose(); feed.Dispose(); cancellation.Dispose(); };
         UpdateView();
     }
     static Button Button(string text, EventHandler click)
     {
-        var b = new Button { Text = text, AutoSize = true, Padding = new Padding(12, 4, 12, 4), Margin = new Padding(0, 5, 10, 5) }; b.Click += click; return b;
+        var b = new CollectorButton { Text = text, AutoSize = true, Padding = new Padding(12, 6, 12, 6), Margin = new Padding(0, 5, 10, 5) }; b.Click += click; return b;
     }
     static Label Label(string text) => new() { Text = text, AutoSize = true, Margin = new Padding(0, 12, 0, 4) };
+    Label Hint(string text)
+    {
+        var label = Label(text);
+        label.MaximumSize = new Size(760, 0);
+        explanations.Add(label);
+        return label;
+    }
+    void ApplyExplanationVisibility()
+    {
+        foreach (var hint in explanations) hint.Visible = settings.ShowExplanations;
+        explanationToggle.Text = settings.ShowExplanations ? "説明：ON" : "説明：OFF";
+        explanationToggle.AccessibleDescription = settings.ShowExplanations ? "補足説明を非表示にします" : "補足説明を表示します";
+    }
     void BuildUi()
     {
-        var header = new Panel { Dock = DockStyle.Top, Height = 98, Padding = new Padding(22, 16, 22, 12), BackColor = Color.FromArgb(33, 38, 54) };
-        header.Controls.Add(new Label { Text = "BOOTH Free Collector", ForeColor = Color.White, Font = new Font(Font.FontFamily, 21, FontStyle.Bold), AutoSize = true, Location = new Point(22, 12) });
-        header.Controls.Add(new Label { Text = "無料の新着を、12時間ごとに。", ForeColor = Color.FromArgb(195, 203, 220), AutoSize = true, Location = new Point(25, 57) });
+        var header = new Panel { Dock = DockStyle.Top, Width = ClientSize.Width, Height = 82, Padding = new Padding(22, 16, 22, 12) };
+        header.Controls.Add(new Label { Text = "BOOTH Free Downloader", Font = new Font(Font.FontFamily, 20, FontStyle.Bold), AutoSize = true, Location = new Point(22, 23) });
+        explanationToggle.Location = new Point(ClientSize.Width - 158, 24);
+        explanationToggle.Click += (_, _) =>
+        {
+            settings.ShowExplanations = !settings.ShowExplanations;
+            Storage.Save("settings.json", settings);
+            ApplyExplanationVisibility();
+        };
+        header.Controls.Add(explanationToggle);
         Controls.Add(tabs); Controls.Add(header);
-        var overview = new TabPage("状況") { Padding = new Padding(20) };
+        var overview = new BufferedPanel { Text = "ダウンロード", Padding = new Padding(28, 14, 28, 20) };
         var overviewLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6 };
-        overviewLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); overviewLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        overviewLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize)); overviewLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        overviewLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 60)); overviewLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 40));
-        status.Font = new Font(Font, FontStyle.Bold); status.Margin = new Padding(0, 0, 0, 10);
+        overviewLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 64)); overviewLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
+        overviewLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30)); overviewLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
+        overviewLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); overviewLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 90));
+        status.Font = new Font(Font.FontFamily, 14, FontStyle.Bold); status.Margin = new Padding(0, 0, 0, 14);
         overviewLayout.Controls.Add(status); overviewLayout.Controls.Add(schedule); overviewLayout.Controls.Add(folderLabel);
         var actions = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
-        actions.Controls.Add(Button("予定を確認・待機分を再開", async (_, _) => { engine.Resume(); await Tick(true); }));
-        actions.Controls.Add(Button("一時停止", (_, _) => { cancellation.Cancel(); engine.Stop(); settings.AutoDownload = false; auto.Checked = false; Storage.Save("settings.json", settings); Log("自動ダウンロードを一時停止しました"); }));
-        actions.Controls.Add(Button("保存先を開く", (_, _) => { try { var p = settings.ResolveFolder(); if (Directory.Exists(p)) Process.Start(new ProcessStartInfo(p) { UseShellExecute = true }); } catch (IOException ex) { MessageBox.Show(this, ex.Message); } }));
-        actions.Controls.Add(Button("保存済み一覧から過去分を追加", async (_, _) => await QueueHistory()));
-        actions.Controls.Add(Button("取得済みファイルを登録", (_, _) => RegisterBrowserFile()));
+        resumeButton = Button("確認・再開", async (_, _) =>
+        {
+            settings.AutoDownload = true; auto.Checked = true; Storage.Save("settings.json", settings);
+            await Tick(true);
+        });
+        primaryButtons.Add(resumeButton); actions.Controls.Add(resumeButton);
+        pauseButton = Button("一時停止", (_, _) => { cancellation.Cancel(); settings.AutoDownload = false; auto.Checked = false; Storage.Save("settings.json", settings); Log("自動ダウンロードを一時停止しました"); });
+        actions.Controls.Add(pauseButton);
+        actions.Controls.Add(Button("保存先を開く", async (_, _) => { if (await CheckLibrary() && confirmedFolder is string path && Directory.Exists(path)) Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }); }));
+        actions.Controls.Add(Button("過去分を追加", async (_, _) => await QueueHistory()));
         overviewLayout.Controls.Add(actions);
         grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "待機中の商品", DataPropertyName = "Title", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill });
         grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "ショップ", DataPropertyName = "Shop", Width = 220 });
         grid.CellDoubleClick += (_, e) => { if (e.RowIndex >= 0 && grid.Rows[e.RowIndex].DataBoundItem is Product p && Feed.SafeId(p.Id)) Process.Start(new ProcessStartInfo("https://booth.pm/ja/items/" + p.Id) { UseShellExecute = true }); };
-        overviewLayout.Controls.Add(grid); overviewLayout.Controls.Add(events); overview.Controls.Add(overviewLayout); tabs.TabPages.Add(overview);
+        grid.DataSource = new List<Product>();
+        var queueSurface = new BufferedPanel { Dock = DockStyle.Fill, Margin = new Padding(0, 8, 0, 12) };
+        queueSurface.Controls.Add(grid); queueSurface.Controls.Add(emptyQueue);
+        overviewLayout.Controls.Add(queueSurface); overviewLayout.Controls.Add(events); overview.Controls.Add(overviewLayout); tabs.TabPages.Add(overview);
 
-        var config = new TabPage("設定") { Padding = new Padding(20) };
+        var config = new BufferedPanel { Text = "設定", Padding = new Padding(28, 14, 28, 20) };
         var configScroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
         var layout = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
-        layout.Controls.Add(Label("保存先")); layout.Controls.Add(follow);
-        var lib = LibraryInfo.Read();
+        layout.Controls.Add(Label("保存先（公式Library Managerから自動取得）"));
         layout.Controls.Add(libraryFolderStatus);
-        layout.Controls.Add(Label("未導入時は下の保存先を使います。チェックを外すと、表示中の保存先に固定します。"));
-        var folderRow = new FlowLayoutPanel { AutoSize = true }; folderRow.Controls.Add(folder);
-        folderRow.Controls.Add(Button("選択", (_, _) => { using var dialog = new FolderBrowserDialog { SelectedPath = folder.Text }; if (dialog.ShowDialog(this) == DialogResult.OK) { follow.Checked = false; folder.Text = dialog.SelectedPath; } }));
-        layout.Controls.Add(folderRow);
+        layout.Controls.Add(Hint("保存先は公式ライブラリの設定で変更できます。変更は自動で反映されます。"));
         layout.Controls.Add(Label("取得する商品")); layout.Controls.Add(auto); layout.Controls.Add(adult); layout.Controls.Add(existing);
         layout.Controls.Add(Label("キーワード（商品名・ショップ・タグ）")); layout.Controls.Add(search);
-        layout.Controls.Add(Label("対象カテゴリは「ダウンロード対象」タブで選択できます。"));
+        layout.Controls.Add(Hint("カテゴリは「ダウンロード対象」タブで選択できます。"));
         layout.Controls.Add(Label("配信URL")); layout.Controls.Add(endpoint);
         layout.Controls.Add(startup);
-        layout.Controls.Add(browserHandoff);
-        layout.Controls.Add(Label("一覧の取得は失敗時・再起動後も12時間に1度です。\n初回は保存済み一覧の対象カテゴリ、以降も選択カテゴリの新着を取得します。\n保存済みファイルを上書きせず、ZIPの展開や実行はしません。"));
+        layout.Controls.Add(startManager);
+        layout.Controls.Add(Hint("一覧の取得間隔は12時間です。選んだカテゴリの無料商品を、公式ライブラリで保存・展開します。"));
         var save = Button("設定を保存して開始", async (_, _) => await SaveSettings());
-        save.Dock = DockStyle.Bottom; save.Height = 44; save.BackColor = Color.FromArgb(223, 238, 255);
+        save.Dock = DockStyle.Bottom; save.Height = 44; primaryButtons.Add(save);
         configScroll.Controls.Add(layout); config.Controls.Add(configScroll); config.Controls.Add(save); tabs.TabPages.Add(config);
         BuildCategoryTab();
-        var integration = new TabPage("ブラウザ連携") { Padding = new Padding(20) };
-        var info = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true };
-        info.Controls.Add(Label("Windows単体: 認証不要のファイルは直接取得。認証が必要なら既定ブラウザへ受け渡します。\nブラウザで取得した後、状況タブの「取得済みファイルを登録」で保存先へ整理できます。\n\n拡張単体: ブラウザのダウンロードフォルダ配下へ保存。\n両方あり: 拡張からファイルデータを受け取り、Library Managerの保存先へ直接保存します。\n\nCookieやパスワードはアプリに渡さず、保存もしません。"));
-        info.Controls.Add(Button("拡張のフォルダを開く", (_, _) => { string path = Path.Combine(AppContext.BaseDirectory, "extension"); if (Directory.Exists(path)) Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }); }));
-        info.Controls.Add(Button("既定ブラウザでBOOTHを開く", (_, _) => Process.Start(new ProcessStartInfo("https://accounts.booth.pm/") { UseShellExecute = true })));
-        info.Controls.Add(Label("Chrome / Edge の拡張管理画面で「パッケージ化されていない拡張機能」を読み込みます。\n導入後は、拡張の画面から連携状態を確認できます。"));
-        integration.Controls.Add(info); tabs.TabPages.Add(integration);
-        follow.Checked = settings.FollowLibraryFolder;
-        folder.Text = follow.Checked ? lib.Folder ?? fixedFolderDraft : fixedFolderDraft;
-        follow.CheckedChanged += (_, _) =>
-        {
-            // Turning follow off pins the currently displayed location instead of jumping elsewhere.
-            fixedFolderDraft = folder.Text;
-            if (follow.Checked) folder.Text = LibraryInfo.Read().Folder ?? fixedFolderDraft;
-            folder.Enabled = !follow.Checked;
-        };
-        folder.TextChanged += (_, _) => { if (!follow.Checked) fixedFolderDraft = folder.Text; };
-        folder.Enabled = !follow.Checked;
+        BuildLoginTab();
         auto.Checked = settings.AutoDownload; adult.Checked = settings.IncludeAdult; existing.Checked = settings.IncludeExisting;
-        browserHandoff.Checked = settings.BrowserHandoff;
+        startManager.Checked = settings.AutoStartOfficialManager;
         existing.Enabled = !state.BaselineCreated; startup.Checked = settings.Startup; search.Text = settings.Search; endpoint.Text = settings.FeedUrl;
     }
     void BuildCategoryTab()
     {
-        var page = new TabPage("ダウンロード対象") { Padding = new Padding(20) };
+        var page = new BufferedPanel { Text = "ダウンロード対象", Padding = new Padding(28, 14, 28, 20) };
         var panel = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
-        panel.Controls.Add(Label("初回の過去分と12時間ごとの新着に共通の設定です。初期値は優先度「高」のみ。\nすべて外すとダウンロードしません。変更後は下の保存ボタンを押してください。"));
+        panel.Controls.Add(Hint("初期設定は衣装・髪型のみです。チェックをすべて外すと取得しません。変更後は下のボタンで保存してください。"));
         foreach (string priority in new[] { "高", "中", "低" })
         {
             var group = new CheckBox { Text = "優先度：" + priority + "（まとめて選択）", AutoSize = true, ThreeState = true, AutoCheck = false, Margin = new Padding(0, 20, 0, 6) };
@@ -175,9 +223,9 @@ public sealed class MainForm : Form
             };
             Sync();
         }
-        panel.Controls.Add(Label("カテゴリを追加した後、過去分も必要なら状況タブの「保存済み一覧から過去分を追加」を使ってください。\n拡張機能版の取得は衣装・髪型のみです。"));
+        panel.Controls.Add(Hint("追加したカテゴリの過去分も取得する場合は、ダウンロード画面の「過去分を追加」を選んでください。"));
         var save = Button("対象カテゴリを保存して開始", async (_, _) => await SaveSettings());
-        save.Dock = DockStyle.Bottom; page.Controls.Add(panel); page.Controls.Add(save); tabs.TabPages.Add(page);
+        save.Dock = DockStyle.Bottom; primaryButtons.Add(save); page.Controls.Add(panel); page.Controls.Add(save); tabs.TabPages.Add(page);
     }
     async Task SaveSettings()
     {
@@ -186,14 +234,13 @@ public sealed class MainForm : Form
         {
             var uri = new Uri(endpoint.Text.Trim());
             if (uri.Scheme != "https" || uri.UserInfo.Length > 0 || uri.AbsolutePath != "/catalog.json") throw new IOException("HTTPS のカタログURLを指定してください");
-            if (follow.Checked && LibraryInfo.Read().Error is string error) throw new IOException("Library Manager の設定を読めません: " + error);
-            if (!Path.IsPathFullyQualified(fixedFolderDraft) || fixedFolderDraft.StartsWith(@"\\")) throw new IOException("保存先はローカルの絶対パスで指定してください");
-            settings.FollowLibraryFolder = follow.Checked; settings.DownloadFolder = fixedFolderDraft;
+            settings.FollowLibraryFolder = true;
             settings.AutoDownload = auto.Checked; settings.IncludeAdult = adult.Checked; settings.IncludeExisting = existing.Checked;
             settings.Search = search.Text.Trim(); settings.Category = ""; settings.FeedUrl = uri.AbsoluteUri;
             settings.DownloadCategories = categoryChecks.Where(c => c.Value.Checked).Select(c => c.Key).ToArray();
             settings.Startup = startup.Checked; settings.Configured = true;
-            settings.BrowserHandoff = browserHandoff.Checked;
+            settings.AutoStartOfficialManager = startManager.Checked;
+            settings.BrowserHandoff = false;
             using (var run = Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))
             {
                 if (settings.Startup) run.SetValue("BoothFreeCollector", $"\"{Environment.ProcessPath}\" --tray");
@@ -220,203 +267,286 @@ public sealed class MainForm : Form
         }
         catch (Exception ex) when (ex is IOException or System.Text.Json.JsonException) { MessageBox.Show(this, ex.Message); }
     }
+    void BuildLoginTab()
+    {
+        var page = new BufferedPanel { Text = "セットアップ", Padding = new Padding(28, 14, 28, 20) };
+        var top = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
+        top.Controls.Add(setupLibraryStatus);
+        libraryCheckButton = Button("① 公式ライブラリを確認", async (_, _) => await SetupAction(async () =>
+        { if (await CheckLibrary()) await EnsureSession(); }));
+        top.Controls.Add(libraryCheckButton);
+        var install = new LinkLabel { Text = "公式ライブラリの入手方法（BOOTH公式案内）", AutoSize = true };
+        install.LinkClicked += (_, _) => Process.Start(new ProcessStartInfo("https://booth.pm/announcements/893") { UseShellExecute = true });
+        top.Controls.Add(install);
+        top.Controls.Add(Label("② 専用アカウントでログインし、ログイン状態を保存します"));
+        top.Controls.Add(new Label { Text = EmbeddedSession.LoginWarning, ForeColor = Color.Firebrick,
+            Font = new Font(Font.FontFamily, 15, FontStyle.Bold), AutoSize = true, Margin = new Padding(0, 0, 0, 8) });
+        top.Controls.Add(new Label { Text = "メインアカウントの購入履歴や個人情報と分けるためです。\nこのアプリはログイン状態でBOOTHへアクセスするため、専用アカウントの利用でも安全を保証するものではありません。",
+            ForeColor = Color.Firebrick, AutoSize = true, MaximumSize = new Size(850, 0) });
+        top.Controls.Add(Label("別アカウントの利用はBOOTHの規約に従ってください。普段のChromeのログイン情報はコピーしません。"));
+        top.Controls.Add(Hint("ログイン状態は次回起動でも利用します。期限が切れたら、この画面でログインし直してください。"));
+        var article = new LinkLabel { Text = "詳しい説明（Zenn記事）：" + EmbeddedSession.ArticleUrl, AutoSize = true, Margin = new Padding(0, 5, 0, 5) };
+        article.LinkClicked += (_, _) => Process.Start(new ProcessStartInfo(EmbeddedSession.ArticleUrl) { UseShellExecute = true });
+        top.Controls.Add(article); top.Controls.Add(loginStatus);
+        var actions = new FlowLayoutPanel { AutoSize = true };
+        actions.Controls.Add(Button("説明を確認してログインする", async (_, _) => await SetupAction(async () =>
+        {
+            if (!await CheckLibrary()) return;
+            settings.SetupCompleted = false; settings.DedicatedSessionEnabled = true;
+            Storage.Save("settings.json", settings);
+            Storage.Save("session-import-verification.json", new SessionImportVerification());
+            await EnsureSession(); session.OpenLogin();
+        })));
+        actions.Controls.Add(Button("ログインと接続を確認", async (_, _) =>
+        {
+            await SetupAction(async () =>
+            {
+                if (!await CheckLibrary()) return;
+                await EnsureSession();
+                if (await session.CheckLoginAsync(CancellationToken.None))
+                {
+                    await VerifyImportConnection();
+                    settings.DedicatedSessionEnabled = true; settings.SetupCompleted = true; settings.Configured = true; Storage.Save("settings.json", settings);
+                    loginStatus.Text = "初回セットアップ完了。ログイン状態を専用領域に保存しました";
+                }
+            });
+            if (settings.SetupCompleted) await Tick(true);
+        }));
+        logoutButton = Button("ログアウト・認証データを削除", async (_, _) => await SetupAction(async () =>
+        {
+            // Disable acquisition before clearing data, including when a clear
+            // fails. Removing credentials must not depend on Manager running.
+            settings.DedicatedSessionEnabled = false; settings.SetupCompleted = false;
+            Storage.Save("settings.json", settings);
+            Storage.Save("session-import-verification.json", new SessionImportVerification());
+            if (session.Ready || Directory.Exists(session.ProfileFolder))
+            {
+                await EnsureSession();
+                if (testRequirement is not null && BeforeForgetForVerification is not null) await BeforeForgetForVerification();
+                await session.ForgetAsync(CancellationToken.None);
+            }
+            loginStatus.Text = "アプリ専用のCookie・キャッシュなどを削除しました";
+        }));
+        foreach (Control action in actions.Controls) { sessionActions.Add(action); action.Enabled = false; }
+        actions.Controls.Add(logoutButton);
+        top.Controls.Add(actions); page.Controls.Add(session.LoginView); page.Controls.Add(top); tabs.TabPages.Add(page);
+    }
+    async Task<bool> CheckLibrary()
+    {
+        if (testRequirement is null && !ManagerIntegration.IsAvailable())
+        {
+            try { managerLauncher.TryStart(settings); }
+            catch (IOException ex) { setupLibraryStatus.Text = ex.Message; }
+        }
+        var requirement = await Task.Run(() => testRequirement is not null ? testRequirement() : OfficialLibraryRequirement.Check());
+        if (testRequirement is null) requirement = managerLauncher.Confirm(requirement);
+        if (requirement.Ready && testRequirement is null)
+        {
+            string path = ManagerIntegration.RunningExecutable();
+            if (settings.OfficialManagerExecutable != path) { settings.OfficialManagerExecutable = path; Storage.Save("settings.json", settings); }
+        }
+        libraryReady = requirement.Ready;
+        confirmedFolder = requirement.Ready ? requirement.Folder : null;
+        setupLibraryStatus.Text = "① " + requirement.Message;
+        setupLibraryStatus.ForeColor = libraryReady ? CollectorTheme.Success : CollectorTheme.Warning;
+        RefreshSessionActions();
+        if (!libraryReady) { session.Suspend(); state.Status = requirement.Message; }
+        else session.Resume();
+        return libraryReady;
+    }
+    void RefreshSessionActions()
+    {
+        if (libraryCheckButton is not null) libraryCheckButton.Enabled = !busy && !setupBusy;
+        foreach (var action in sessionActions) action.Enabled = libraryReady && !busy && !setupBusy;
+        if (logoutButton is not null) logoutButton.Enabled = !busy && !setupBusy && (session.Ready || Directory.Exists(session.ProfileFolder));
+    }
+    async Task SetupAction(Func<Task> action)
+    {
+        if (busy || setupBusy) { loginStatus.Text = "処理の完了を待ってから操作してください"; return; }
+        setupBusy = true; RefreshSessionActions();
+        try { await action(); }
+        catch (Exception) { loginStatus.Text = "操作を完了できません。ログイン画面とWebView2 Runtimeを確認して、もう一度お試しください"; }
+        finally { setupBusy = false; RefreshSessionActions(); }
+    }
+    async Task EnsureSession()
+    {
+        try { await (sessionInitialization ??= session.InitializeAsync()); }
+        catch { sessionInitialization = null; throw; }
+    }
+    async Task VerifyImportConnection()
+    {
+        if (!File.Exists(Path.Combine(Storage.Root, "catalog.json"))) return;
+        var catalog = Storage.Load<Feed>("catalog.json"); catalog.Validate();
+        var receipt = state.ManagerImports.Values.Where(r => r.Confirmed && catalog.Items.Any(p => p.Id == r.ProductId && p.Matches(settings) && p.Variants.Any(v => v.Id == r.VariantId)))
+            .OrderByDescending(r => r.At).FirstOrDefault();
+        if (receipt is null) return;
+        var product = catalog.Items.First(p => p.Id == receipt.ProductId);
+        string html = await session.GetProductHtmlAsync(product.Url, CancellationToken.None);
+        var plan = await Task.Run(() => SessionDownloadQueue.Plan(html, product));
+        if (!plan.Any(f => f.FileId == receipt.FileId && f.VariantId == receipt.VariantId && f.Name == receipt.Name))
+            throw new IOException("確認対象ファイルの無料条件が変わった可能性があります");
+        // Validate one already-known free entrance without launching Manager or
+        // downloading the file again. The capability never enters saved state.
+        string uri = await session.GetImportAsync(receipt.FileId, receipt.VariantId, CancellationToken.None);
+        ManagerIntegration.ValidateBoundLink(uri, receipt.ProductId, receipt.FileId, receipt.VariantId, receipt.Name);
+        Storage.Save("session-import-verification.json", new { ok = true, page_plan_verified = true, checked_at = DateTimeOffset.UtcNow, product_id = receipt.ProductId, file_id = receipt.FileId });
+        loginStatus.Text = "アプリ専用ログインと取り込み情報を確認しました（再ダウンロードなし）";
+    }
     async Task Tick(bool resume = false)
     {
-        RefreshFolderStatus();
-        if (busy || directFiles.Count > 0 || !settings.Configured || !engine.Ready) return;
-        if (DateTimeOffset.UtcNow < bridgeActiveUntil) { UpdateView(); return; }
-        busy = true;
-        cancellation.Dispose(); cancellation = new();
+        if (busy || setupBusy) return;
+        busy = true; RefreshSessionActions(); cancellation.Dispose(); cancellation = new();
         try
         {
-            if (state.Due(DateTimeOffset.UtcNow))
-            {
-                await feed.Fetch(settings, state, cancellation.Token);
-                Log(state.Status);
-                if (state.Queue.Count > 0) Notify($"無料商品の待機分 {state.Queue.Count:N0}件");
-            }
-            UpdateView();
-            // A failed batch waits until the next feed cycle or explicit resume.
-            if (settings.AutoDownload && !engine.NeedsLogin && (resume || batchAttempt != state.LastAttempt))
-            {
-                batchAttempt = state.LastAttempt;
-                foreach (var p in state.Queue.ToArray())
-                {
-                    cancellation.Token.ThrowIfCancellationRequested();
-                    if (!p.Matches(settings)) continue;
-                    try
-                    {
-                        state.Status = "取得中: " + p.Title; UpdateView();
-                        bool completed = await engine.DownloadProduct(p, settings, state, cancellation.Token);
-                        if (!completed) { state.Status = "既定ブラウザの取得待ち。取得済みファイルを登録するか、拡張を接続してください"; break; }
-                        state.Queue.Remove(p); Storage.Save("state.json", state); UpdateView();
-                        await Task.Delay(TimeSpan.FromSeconds(5), cancellation.Token);
-                    }
-                    catch (IOException ex) { state.Status = ex.Message; Log(ex.Message); break; }
-                }
-                if (state.Queue.Count == 0) state.Status = "取得完了。次の新着確認まで待機しています";
-            }
+            if (!await CheckLibrary()) return;
+            if (!settings.Configured || !settings.SetupCompleted) { state.Status = "初回セットアップで公式ライブラリと専用ログインを確認してください"; return; }
+            if (!session.Ready) { await EnsureSession(); if (settings.DedicatedSessionEnabled) await session.CheckLoginAsync(cancellation.Token); }
+            if (session.NeedsLogin) { state.Status = "アプリ内のログインを確認してください"; return; }
+            if (state.Due(DateTimeOffset.UtcNow)) await feed.Fetch(settings, state, cancellation.Token);
+            if (settings.SetupCompleted && session.Ready && !session.NeedsLogin) await downloadQueue.StepAsync(settings, state, cancellation.Token);
+            else state.Status = "初回セットアップで専用アカウントのログインを完了してください";
+            if (state.Queue.All(p => !p.Matches(settings))) state.Status = "取得完了。次の新着確認まで待機しています";
         }
         catch (OperationCanceledException) { state.Status = "一時停止しました"; }
-        catch (Exception ex) { state.Status = "取得できません: " + ex.Message; Log(state.Status); }
-        finally { busy = false; Storage.Save("state.json", state); UpdateView(); }
+        catch (IOException ex) { state.Status = ex.Message; }
+        catch (Exception) { state.Status = "処理を完了できません。ログイン状態・公式Manager・通信を確認してください"; }
+        finally
+        {
+            busy = false; RefreshSessionActions(); Storage.Save("state.json", state); UpdateView();
+            timer.Interval = DownloadScheduler.PollIntervalMs(state, settings, DateTimeOffset.UtcNow);
+        }
     }
-    DateTimeOffset? batchAttempt;
-    // Chrome's alarm runs once a minute. Give an already-running extension time
-    // to share its last fetch before a fresh desktop installation performs I/O.
-    DateTimeOffset bridgeActiveUntil = DateTimeOffset.UtcNow.AddSeconds(75);
-    string? feedLease;
-    readonly Dictionary<string, ImportTicket> importTickets = [];
-    sealed record ImportTicket(string ProductId, string Key, string Name, string Relative, DateTimeOffset At);
-    Task<object> DispatchBridge(JsonElement request)
-    {
-        var result = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
-        BeginInvoke(() => { try { result.SetResult(HandleBridge(request)); } catch (Exception ex) { result.SetResult(new { desktop = true, ok = false, error = ex.Message }); } });
-        return result.Task;
-    }
-    object HandleBridge(JsonElement request)
-    {
-        string Text(string name) => request.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString()! : "";
-        string command = Text("command");
-        bridgeActiveUntil = DateTimeOffset.UtcNow.AddSeconds(90);
-        if (command == "status")
-        {
-            if (!busy && DateTimeOffset.TryParse(Text("last_attempt"), out var previous) && previous <= DateTimeOffset.UtcNow && (state.LastAttempt is null || previous > state.LastAttempt))
-            { state.LastAttempt = previous; Storage.Save("state.json", state); }
-            var library = LibraryInfo.Read();
-            return new { desktop = true, ok = true, busy, settings.Configured, settings, state.LastAttempt, next_attempt = state.NextAttempt, state.GeneratedAt, pending_count = state.Queue.Count,
-                app_version = Application.ProductVersion, library_folder = library.Folder, library_error = library.Error,
-                download_folder = settings.FollowLibraryFolder ? library.Folder ?? settings.DownloadFolder : settings.DownloadFolder,
-                saved_files = state.Files.Count, browser_pending = state.BrowserPending.Count, direct_stream = true, active_transfers = directFiles.Count };
-        }
-        if (busy) return new { desktop = true, ok = false, busy = true, error = "Windows側の処理完了を待っています" };
-        if (!settings.Configured) return new { desktop = true, ok = false, error = "Windows側で初期設定を保存してください" };
-        if (command == "reserve")
-        {
-            bool allowed = state.Due(DateTimeOffset.UtcNow);
-            if (allowed) { state.LastAttempt = DateTimeOffset.UtcNow; feedLease = Guid.NewGuid().ToString("N"); Storage.Save("state.json", state); }
-            return new { desktop = true, ok = true, allowed, lease = allowed ? feedLease : null, state.Etag, state.LastAttempt };
-        }
-        if (command == "feed")
-        {
-            if (feedLease is null || Text("lease") != feedLease) throw new IOException("一覧取得の予約が一致しません");
-            if (request.TryGetProperty("not_modified", out var nm) && nm.GetBoolean()) { state.LastSuccess = DateTimeOffset.UtcNow; Storage.Save("state.json", state); }
-            else
-            {
-                var data = request.GetProperty("feed").Deserialize<Feed>(Storage.Json) ?? throw new IOException("一覧が空です");
-                FeedClient.Apply(settings, state, data, Text("etag"));
-            }
-            feedLease = null; UpdateView(); return new { desktop = true, ok = true };
-        }
-        if (command == "sync_cache")
-        {
-            var cached = request.GetProperty("feed").Deserialize<Feed>(Storage.Json) ?? throw new IOException("一覧が空です");
-            cached.Validate();
-            if (state.GeneratedAt is null || DateTimeOffset.Parse(cached.GeneratedAt) > DateTimeOffset.Parse(state.GeneratedAt)) FeedClient.Apply(settings, state, cached);
-            UpdateView(); return new { desktop = true, ok = true };
-        }
-        if (command == "catalog")
-        {
-            if (!File.Exists(Path.Combine(Storage.Root, "catalog.json"))) return new { desktop = true, ok = true, items = Array.Empty<Product>(), total = 0 };
-            var catalog = Storage.Load<Feed>("catalog.json");
-            int offset = request.TryGetProperty("offset", out var offsetValue) ? Math.Max(0, offsetValue.GetInt32()) : 0;
-            return new { desktop = true, ok = true, catalog.GeneratedAt, items = catalog.Items.Skip(offset).Take(100), total = catalog.Items.Length };
-        }
-        bool highOnly = request.TryGetProperty("high_priority_only", out var highValue) && highValue.ValueKind == JsonValueKind.True;
-        if (command == "jobs") return new { desktop = true, ok = true, auto_download = settings.AutoDownload, items = state.Queue.Where(p => p.Matches(settings) && (!highOnly || DownloadCategories.HighPriority(p))).Take(10).ToArray() };
-        if (command == "pending") return new { desktop = true, ok = true, product_ids = state.Queue.Where(p => p.Matches(settings)).Select(p => p.Id).Distinct().ToArray() };
-        if (command == "sync_pending")
-        {
-            var ids = request.GetProperty("product_ids").Deserialize<string[]>() ?? [];
-            if (ids.Length > 100 || ids.Any(id => !Feed.SafeId(id))) throw new IOException("待機分の形式が不正です");
-            FeedClient.MergePending(settings, state, Storage.Load<Feed>("catalog.json"), ids);
-            Storage.Save("state.json", state); UpdateView(); return new { desktop = true, ok = true };
-        }
-        if (command == "history")
-        {
-            var pending = state.Queue.Select(p => p.Id).ToHashSet();
-            foreach (var product in Storage.Load<Feed>("catalog.json").Items.Where(p => p.Matches(settings) && (!highOnly || DownloadCategories.HighPriority(p)))) if (pending.Add(product.Id)) state.Queue.Add(product);
-            Storage.Save("state.json", state); UpdateView(); return new { desktop = true, ok = true, count = state.Queue.Count };
-        }
-        if (command == "prepare")
-        {
-            string id = Text("product_id"), fileId = Text("file_id"), variant = Text("variant_id"), name = DownloadEngine.SafeFileName(Text("name"));
-            if (!Feed.SafeId(id) || !Feed.SafeId(fileId) || !Feed.SafeId(variant)) throw new IOException("ファイルIDが不正です");
-            var product = Storage.Load<Feed>("catalog.json").Items.FirstOrDefault(p => p.Id == id && p.Variants.Any(v => v.Id == variant));
-            if (product is null || !product.Matches(settings)) throw new IOException("取得対象の商品ではありません");
-            string key = id + "/" + fileId;
-            bool skip = DownloadEngine.HasSaved(state, key) || LibraryInfo.Read().HasLocalDownload(id, name, DownloadEngine.ResolveRoot(settings));
-            if (skip) return new { desktop = true, ok = true, skip = true };
-            string ticket = Guid.NewGuid().ToString("N"), relative = $"BOOTH-Free-Collector/b{id}/{fileId}/{name}";
-            importTickets[ticket] = new(id, key, name, relative, DateTimeOffset.UtcNow);
-            return new { desktop = true, ok = true, skip = false, ticket, relative_filename = relative, direct_stream = true };
-        }
-        if (command is "begin_file" or "file_chunk" or "finish_file" or "abort_file")
-        {
-            string ticketId = Text("ticket");
-            if (!importTickets.TryGetValue(ticketId, out var ticket) || DateTimeOffset.UtcNow - ticket.At > TimeSpan.FromDays(1)) throw new IOException("保存予約を取り直してください");
-            if (command == "abort_file") { directFiles.Abort(ticketId); importTickets.Remove(ticketId); return new { desktop = true, ok = true }; }
-            try
-            {
-                if ((command is "begin_file" or "file_chunk") && !settings.AutoDownload) throw new IOException("自動ダウンロードが一時停止中です");
-                if (command == "begin_file")
-                {
-                    long? expected = request.TryGetProperty("size", out var size) && size.ValueKind == JsonValueKind.Number ? size.GetInt64() : null;
-                    string path = directFiles.Begin(ticketId, ticket.Key, ticket.ProductId, ticket.Name, DownloadEngine.ResolveRoot(settings), expected);
-                    state.Status = "Library Managerの保存先へ直接保存中: " + ticket.Name; UpdateView();
-                    return new { desktop = true, ok = true, path };
-                }
-                if (command == "file_chunk") return new { desktop = true, ok = true, received = directFiles.Append(ticketId, request.GetProperty("offset").GetInt64(), Text("data")) };
-                var saved = directFiles.Finish(ticketId, request.GetProperty("size").GetInt64(), state);
-                importTickets.Remove(ticketId); state.Status = "直接保存しました: " + ticket.Name; Log(state.Status); UpdateView();
-                return new { desktop = true, ok = true, path = saved.Path, sha256 = saved.Sha256, size = saved.Size };
-            }
-            catch { directFiles.Abort(ticketId); throw; }
-        }
-        if (command == "complete")
-        {
-            string ticketId = Text("ticket");
-            if (!importTickets.TryGetValue(ticketId, out var ticket) || DateTimeOffset.UtcNow - ticket.At > TimeSpan.FromDays(1)) throw new IOException("保存予約を取り直してください");
-            string source = Path.GetFullPath(Text("path"));
-            if (!DownloadEngine.MatchesBrowserFile(source, ticket.Relative, settings.BrowserDownloadsFolder, ticket.Name)) throw new IOException("拡張のダウンロードファイルではありません");
-            DownloadEngine.ImportFile(settings, state, ticket.Key, ticket.ProductId, ticket.Name, source);
-            importTickets.Remove(ticketId); Log("拡張から整理しました: " + ticket.Name); UpdateView();
-            return new { desktop = true, ok = true, path = state.Files[ticket.Key].Path };
-        }
-        if (command == "finish") { state.Queue.RemoveAll(p => p.Id == Text("product_id")); Storage.Save("state.json", state); UpdateView(); return new { desktop = true, ok = true }; }
-        throw new IOException("未対応の連携操作です");
-    }
-    void RegisterBrowserFile()
-    {
-        if (busy) { MessageBox.Show(this, "処理が終わるか一時停止してから登録してください"); return; }
-        string? id = (grid.CurrentRow?.DataBoundItem as Product)?.Id;
-        var candidates = state.BrowserPending.Where(p => id is null || p.Value.ProductId == id).ToArray();
-        if (candidates.Length == 0) { MessageBox.Show(this, "ブラウザへ受け渡した待機ファイルはありません"); return; }
-        var pending = candidates[0];
-        using var dialog = new OpenFileDialog { Title = "取得済みファイルを選択: " + pending.Value.Name, FileName = pending.Value.Name, InitialDirectory = settings.BrowserDownloadsFolder };
-        if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        try { DownloadEngine.ImportFile(settings, state, pending.Key, pending.Value.ProductId, pending.Value.Name, dialog.FileName); state.Status = "ファイルを登録しました。再開で次を処理できます"; UpdateView(); }
-        catch (IOException ex) { MessageBox.Show(this, ex.Message); }
-    }
+
     void UpdateView()
     {
         status.Text = state.Status;
-        schedule.Text = state.LastAttempt is null ? "次回の新着確認: 設定保存後" : $"次回の新着確認: {state.NextAttempt.ToLocalTime():yyyy/MM/dd HH:mm}　前回成功: {state.LastSuccess?.ToLocalTime():MM/dd HH:mm}";
-        try { folderLabel.Text = "保存先: " + settings.ResolveFolder(); }
-        catch (IOException) { folderLabel.Text = "保存先: Library Managerの設定の読み取り待ち"; }
-        RefreshFolderStatus();
-        grid.DataSource = null; grid.DataSource = state.Queue.Where(p => p.Matches(settings)).ToList();
-    }
-    void RefreshFolderStatus()
-    {
-        var library = LibraryInfo.Read();
-        libraryFolderStatus.Text = library.Error is not null ? "Library Managerの設定を読み取れません。自動追従ONの場合は取得を停止します。"
-            : library.Folder is null ? "Library Managerは未導入または初期設定前です。固定の保存先で使用できます。"
-            : "現在のLibrary Manager設定: " + library.Folder;
-        if (follow.Checked && library.Error is null) folder.Text = library.Folder ?? fixedFolderDraft;
+        string scheduleText = state.LastAttempt is null ? "次回の新着確認: 設定保存後" : $"次回の新着確認: {state.NextAttempt.ToLocalTime():yyyy/MM/dd HH:mm}　前回成功: {state.LastSuccess?.ToLocalTime():MM/dd HH:mm}";
+        var now = DateTimeOffset.UtcNow;
+        var deadlines = state.Queue.Where(p => p.Matches(settings) && state.ProductBatches.ContainsKey(p.Id))
+            .Select(p => DownloadScheduler.Deadline(state, p.Id, now)).ToArray();
+        if (deadlines.Length > 0)
+        {
+            var deadline = deadlines.Min();
+            scheduleText += $"\n取得期限: {deadline.ToLocalTime():MM/dd HH:mm}　待機 {deadlines.Length}商品　取得中 {DownloadScheduler.Active(state, now)}/{DownloadScheduler.ConcurrentImports}";
+            if (deadline < now) scheduleText += "　期限超過：取得結果を確認中";
+        }
+        if (schedule.Text != scheduleText) schedule.Text = scheduleText;
+        folderLabel.Text = confirmedFolder is null ? "保存先を確認しています" : "保存先: " + confirmedFolder;
+        libraryFolderStatus.Text = confirmedFolder is null ? "公式ライブラリの設定を確認してください" : confirmedFolder;
+        var rows = state.Queue.Where(p => p.Matches(settings)).ToList();
+        var keys = rows.Select(p => (p.Id, p.Title, p.Shop)).ToArray();
+        if (!keys.SequenceEqual(displayedRows))
+        {
+            string? selected = (grid.CurrentRow?.DataBoundItem as Product)?.Id;
+            int first = grid.FirstDisplayedScrollingRowIndex;
+            grid.SuspendLayout();
+            grid.DataSource = rows; displayedRows = keys;
+            if (selected is not null)
+                foreach (DataGridViewRow row in grid.Rows)
+                    if (row.DataBoundItem is Product item && item.Id == selected) { grid.CurrentCell = row.Cells[0]; break; }
+            if (first >= 0 && rows.Count > 0) grid.FirstDisplayedScrollingRowIndex = Math.Min(first, rows.Count - 1);
+            grid.ResumeLayout();
+        }
+        grid.Visible = rows.Count > 0; emptyQueue.Visible = rows.Count == 0;
     }
     void ShowApp() { Show(); WindowState = FormWindowState.Normal; Activate(); }
-    void Notify(string text) { tray.BalloonTipTitle = "BOOTH Free Collector"; tray.BalloonTipText = text; tray.ShowBalloonTip(5000); }
+    protected override void WndProc(ref Message message)
+    {
+        if (AppActivation.MessageId != 0 && message.Msg == AppActivation.MessageId) { ShowApp(); return; }
+        base.WndProc(ref message);
+    }
+    internal async Task<bool> ActivateForVerification()
+    {
+        if (testRequirement is null || Environment.GetEnvironmentVariable("BOOTH_COLLECTOR_TEST_STATE") is null) throw new InvalidOperationException();
+        Hide(); AppActivation.Signal();
+        for (int i = 0; i < 50 && !Visible; i++) await Task.Delay(20);
+        return Visible;
+    }
+    internal EmbeddedSession VerificationSession => session;
+    internal async Task VerifyDependencyForTest()
+    {
+        if (testRequirement is null || Environment.GetEnvironmentVariable("BOOTH_COLLECTOR_TEST_STATE") is null) throw new InvalidOperationException();
+        if (await CheckLibrary()) await EnsureSession();
+    }
+    internal void ShowLoginForVerification() { tabs.SelectedIndex = tabs.TabPages.Count - 1; ShowApp(); }
+    internal bool LogoutAvailableForVerification => logoutButton?.Enabled == true;
+    internal async Task WaitSetupIdleForVerification()
+    {
+        if (testRequirement is null || Environment.GetEnvironmentVariable("BOOTH_COLLECTOR_TEST_STATE") is null) throw new InvalidOperationException();
+        while (setupBusy) await Task.Delay(20);
+    }
+    internal bool MeasurePresentationForVerification(string output)
+    {
+        if (testRequirement is null || Environment.GetEnvironmentVariable("BOOTH_COLLECTOR_TEST_STATE") is null) throw new InvalidOperationException();
+        var savedQueue = state.Queue.ToArray(); string savedStatus = state.Status; var savedSuccess = state.LastSuccess;
+        var latencies = new List<double>(); bool stable = true;
+        try
+        {
+            state.Queue.Clear(); state.Queue.Add(new Product { Id = "1", Title = "サンプル衣装", Shop = "Sample Shop", AgeRating = "all_ages", Categories = ["衣装"] });
+            tabs.SelectedIndex = 0; UpdateView(); PerformLayout();
+            object? binding = grid.DataSource; Point origin = grid.PointToScreen(Point.Empty);
+            for (int i = 0; i < 24; i++)
+            {
+                state.LastSuccess = DateTimeOffset.UtcNow.AddMinutes(i);
+                state.Status = i % 2 == 0 ? "次の確認まで待機しています" : "保存結果を確認しています：" + new string('衣', 90);
+                UpdateView();
+                stable &= ReferenceEquals(binding, grid.DataSource) && grid.PointToScreen(Point.Empty) == origin && grid.CurrentRow?.DataBoundItem is Product { Id: "1" };
+                var watch = Stopwatch.StartNew();
+                tabs.SelectedIndex = i % tabs.TabPages.Count;
+                tabs.Update(); watch.Stop(); latencies.Add(watch.Elapsed.TotalMilliseconds);
+                tabs.SelectedIndex = 0;
+            }
+            state.Status = "保存結果を確認しています"; UpdateView();
+            using var screenshot = new Bitmap(Width, Height);
+            DrawToBitmap(screenshot, new Rectangle(0, 0, Width, Height)); screenshot.Save(Path.Combine(output, "queue-preview.png"));
+            File.WriteAllText(Path.Combine(output, "presentation-performance.json"), JsonSerializer.Serialize(new { updates = 24,
+                stable_layout_and_selection = stable, navigation_max_ms = latencies.Max(), navigation_average_ms = latencies.Average() }, Storage.Json));
+            return stable;
+        }
+        finally
+        {
+            state.Queue.Clear(); state.Queue.AddRange(savedQueue); state.Status = savedStatus; state.LastSuccess = savedSuccess;
+            UpdateView(); ShowLoginForVerification();
+        }
+    }
+    internal async Task SetPausedForVerification(bool paused)
+    {
+        if (testRequirement is null || Environment.GetEnvironmentVariable("BOOTH_COLLECTOR_TEST_STATE") is null) throw new InvalidOperationException();
+        tabs.SelectedIndex = 0;
+        (paused ? pauseButton : resumeButton)!.PerformClick();
+        while (busy) await Task.Delay(20);
+    }
+    internal async Task InvokeSetupForVerification(bool logout)
+    {
+        if (testRequirement is null || Environment.GetEnvironmentVariable("BOOTH_COLLECTOR_TEST_STATE") is null) throw new InvalidOperationException();
+        if (logout) logoutButton!.PerformClick(); else ((Button)sessionActions[0]).PerformClick();
+        while (setupBusy) await Task.Delay(20);
+    }
+    internal async Task CapturePresentationForVerification(string output)
+    {
+        if (testRequirement is null || Environment.GetEnvironmentVariable("BOOTH_COLLECTOR_TEST_STATE") is null) throw new InvalidOperationException();
+        for (int i = 0; i < tabs.TabPages.Count; i++)
+        {
+            tabs.SelectedIndex = i;
+            await Task.Delay(100);
+            using var screenshot = new Bitmap(Width, Height);
+            DrawToBitmap(screenshot, new Rectangle(0, 0, Width, Height));
+            screenshot.Save(Path.Combine(output, $"screen-{i}.png"));
+        }
+        explanationToggle.PerformClick();
+        await Task.Delay(100);
+        using (var screenshot = new Bitmap(Width, Height))
+        {
+            DrawToBitmap(screenshot, new Rectangle(0, 0, Width, Height));
+            screenshot.Save(Path.Combine(output, "explanations-on.png"));
+        }
+        Storage.Save("ui-presentation.json", new { explanations_enabled = settings.ShowExplanations,
+            saved_preference = Storage.Load<Settings>("settings.json").ShowExplanations,
+            toggle_text = explanationToggle.Text, background = BackColor.ToArgb() });
+        explanationToggle.PerformClick();
+    }
+    internal void CloseForVerification() { exiting = true; Close(); }
+    void Notify(string text) { tray.BalloonTipTitle = "BOOTH Free Downloader"; tray.BalloonTipText = text; tray.ShowBalloonTip(5000); }
     void Log(string text)
     {
         string line = $"{DateTime.Now:MM/dd HH:mm:ss}　{text}";

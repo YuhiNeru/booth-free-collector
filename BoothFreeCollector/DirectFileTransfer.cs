@@ -31,13 +31,30 @@ public sealed class DirectFileTransfer : IDisposable
         transfers[ticket] = transfer with { At = DateTimeOffset.UtcNow };
         return total;
     }
-    public SavedFile Finish(string ticket, long size, CollectorState state)
+    public SavedFile Finish(string ticket, long size, CollectorState state, string? currentRoot = null)
     {
         if (!transfers.TryGetValue(ticket, out var transfer)) throw new IOException("直接保存の予約がありません");
         if (size <= 0 || transfer.Stream.Length != size || (transfer.Expected is long expected && size != expected)) throw new IOException("ファイル容量が一致しません");
         transfer.Stream.Flush(true); transfer.Stream.Dispose();
         try
         {
+            if (currentRoot is not null)
+            {
+                string product = transfer.Key.Split('/')[0];
+                string folder = Path.Combine(currentRoot, "b" + product);
+                string final = Path.Combine(folder, Path.GetFileName(transfer.Final));
+                if (!Path.GetFullPath(final).Equals(Path.GetFullPath(transfer.Final), StringComparison.OrdinalIgnoreCase))
+                {
+                    DownloadEngine.EnsureSafeDirectory(folder);
+                    if (File.Exists(final)) throw new IOException("変更後の保存先に同名ファイルがあります");
+                    string temp = Path.Combine(folder, ".collector-" + Guid.NewGuid().ToString("N") + ".partial");
+                    try { File.Copy(transfer.Temp, temp, false); }
+                    catch { if (File.Exists(temp)) File.Delete(temp); throw; }
+                    File.Delete(transfer.Temp);
+                    transfer = transfer with { Final = final, Temp = temp };
+                    transfers[ticket] = transfer;
+                }
+            }
             DownloadEngine.EnsureNoLinks(transfer.Final);
             File.Move(transfer.Temp, transfer.Final, false);
             DownloadEngine.Remember(state, transfer.Key, transfer.Final);

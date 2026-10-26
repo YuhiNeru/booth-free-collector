@@ -5,7 +5,8 @@ using System.Text.RegularExpressions;
 
 namespace BoothFreeCollector;
 
-// No browser profile, cookie container, or login UI. Authentication stays in the user's browser.
+// Legacy credential-free utilities retained for migration and offline tests.
+// Production v3 uses EmbeddedSession and SessionDownloadQueue for authentication.
 public sealed class DownloadEngine(Action<string> log, HttpMessageHandler? handler = null, Action<string>? handoff = null) : IDisposable
 {
     readonly HttpClient http = new(handler ?? new HttpClientHandler { UseCookies = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(60) };

@@ -18,6 +18,19 @@ public static class BrowserBridge
         foreach (string browser in new[] { "Google\\Chrome", "Microsoft\\Edge" })
         { using var key = Registry.CurrentUser.CreateSubKey(@"Software\" + browser + @"\NativeMessagingHosts\" + HostName); key.SetValue("", path); }
     }
+    public static void Unregister(string? root = null)
+    {
+        if (Environment.GetEnvironmentVariable("BOOTH_COLLECTOR_TEST_STATE") is not null) return;
+        string owned = Path.GetFullPath(Path.Combine(root ?? Storage.Root, "native-host.json"));
+        foreach (string browser in new[] { "Google\\Chrome", "Microsoft\\Edge" })
+        {
+            string subkey = @"Software\" + browser + @"\NativeMessagingHosts\" + HostName;
+            using var key = Registry.CurrentUser.OpenSubKey(subkey);
+            if (key?.GetValue("") is string path && Path.GetFullPath(path).Equals(owned, StringComparison.OrdinalIgnoreCase))
+                Registry.CurrentUser.DeleteSubKey(subkey, false);
+        }
+        if (File.Exists(owned)) File.Delete(owned);
+    }
     public static async Task<byte[]?> Read(Stream input, int max, CancellationToken ct = default)
     {
         byte[] length = new byte[4]; int first = await input.ReadAsync(length.AsMemory(0, 1), ct); if (first == 0) return null;

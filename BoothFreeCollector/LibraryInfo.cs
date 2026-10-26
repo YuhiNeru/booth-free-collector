@@ -44,23 +44,44 @@ public sealed class ReadOnlySqlite : IDisposable
     public void Dispose() { if (db != IntPtr.Zero) { sqlite3_close(db); db = IntPtr.Zero; } }
 }
 
+public enum LocalDownloadState { Missing, Busy, Complete }
+
 public sealed record LibraryInfo(string? Folder, HashSet<string> Registered, string? Error)
 {
     public static string DbPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "pm.booth.library-manager", "data.db");
     public static LibraryInfo Read()
     {
-        if (!File.Exists(DbPath)) return new(null, [], null);
         try
         {
-            using var db = new ReadOnlySqlite(DbPath);
-            var row = db.Query("SELECT item_directory_path FROM preferences LIMIT 1", 1, true).FirstOrDefault();
-            string? folder = row is null ? null : Encoding.Unicode.GetString(row[0]).TrimEnd('\0');
-            if (folder is not null && !Path.IsPathFullyQualified(folder)) throw new IOException("保存先形式を確認できません");
-            var ids = db.Query("SELECT DISTINCT booth_item_id FROM registered_items WHERE booth_item_id IS NOT NULL", 1)
-                .Select(r => Encoding.UTF8.GetString(r[0])).ToHashSet();
-            return new(folder, ids, null);
+            using var source = ActiveLibraryDatabase.Open(DbPath);
+            return ReadSnapshot(source);
         }
-        catch (Exception ex) when (ex is IOException or DllNotFoundException or EntryPointNotFoundException) { return new(null, [], ex.Message); }
+        catch (Exception ex) when (ex is IOException or System.Text.Json.JsonException or System.ComponentModel.Win32Exception or UnauthorizedAccessException or DllNotFoundException or EntryPointNotFoundException) { return new(null, [], ex.Message); }
+    }
+    public static LibraryInfo ReadActive()
+    {
+        try
+        {
+            using var source = ActiveLibraryDatabase.Open(DbPath);
+            return source.Live ? ReadSnapshot(source) : new(null, [], "公式Managerの設定の準備を待っています");
+        }
+        catch (Exception ex) when (ex is IOException or System.Text.Json.JsonException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
+        { return new(null, [], "公式Managerの設定の準備を待っています"); }
+    }
+    internal static LibraryInfo ReadSnapshot(ActiveLibraryDatabase source)
+    {
+        if (source.Cached is not null) return source.Cached;
+        if (!File.Exists(source.Path)) return new(null, [], "公式Library Managerで保存先を設定してください");
+        using var db = new ReadOnlySqlite(source.Path);
+        if (db.Query("PRAGMA quick_check", 1).Any(r => Encoding.UTF8.GetString(r[0]) != "ok")) throw new IOException("公式設定DBの読み取りを再確認してください");
+        var row = db.Query("SELECT item_directory_path FROM preferences LIMIT 1", 1, true).FirstOrDefault();
+        string? folder = row is null ? null : Encoding.Unicode.GetString(row[0]).TrimEnd('\0');
+        if (folder is not null && !Path.IsPathFullyQualified(folder)) throw new IOException("保存先形式を確認できません");
+        var ids = db.Query("SELECT DISTINCT booth_item_id FROM registered_items WHERE booth_item_id IS NOT NULL", 1)
+            .Select(r => Encoding.UTF8.GetString(r[0])).ToHashSet();
+        var info = new LibraryInfo(folder, ids, null);
+        source.Remember(info);
+        return info;
     }
     public bool HasLocalProduct(string id, string destination)
     {
@@ -73,19 +94,52 @@ public sealed record LibraryInfo(string? Folder, HashSet<string> Registered, str
         return false;
     }
     public bool HasLocalDownload(string id, string filename, string destination)
+        => InspectLocalDownload(id, filename, destination) == LocalDownloadState.Complete;
+    public LocalDownloadState InspectLocalDownload(string id, string filename, string destination)
     {
-        if (!Feed.SafeId(id)) return false;
+        if (!Feed.SafeId(id)) return LocalDownloadState.Missing;
         filename = DownloadEngine.SafeFileName(filename);
         var options = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint };
         foreach (var root in new[] { Folder, destination }.Where(x => !string.IsNullOrEmpty(x)).Distinct())
         {
             string product = Path.Combine(root!, "b" + id);
             if (!Directory.Exists(product)) continue;
-            if (Directory.EnumerateFiles(product, "*", options).Any(f => Path.GetFileName(f).Equals(filename, StringComparison.OrdinalIgnoreCase))) return true;
+            // A file nested inside another extracted archive is not evidence
+            // that this independent downloadable was obtained.
+            string direct = Path.Combine(product, filename);
+            if (File.Exists(direct)) return InspectFile(direct, Path.GetExtension(filename).Equals(".zip", StringComparison.OrdinalIgnoreCase));
             // Library Manager may have expanded the archive to its basename folder.
             string extracted = Path.Combine(product, Path.GetFileNameWithoutExtension(filename));
-            if (Directory.Exists(extracted) && (File.GetAttributes(extracted) & FileAttributes.ReparsePoint) == 0 && Directory.EnumerateFiles(extracted, "*", options).Any()) return true;
+            if (Directory.Exists(extracted) && (File.GetAttributes(extracted) & FileAttributes.ReparsePoint) == 0)
+            {
+                if (DateTime.UtcNow - Directory.GetLastWriteTimeUtc(extracted) < TimeSpan.FromSeconds(5)) return LocalDownloadState.Busy;
+                bool found = false;
+                foreach (string file in Directory.EnumerateFiles(extracted, "*", options))
+                {
+                    found = true;
+                    if (InspectFile(file, false, true) != LocalDownloadState.Complete) return LocalDownloadState.Busy;
+                }
+                return found ? LocalDownloadState.Complete : LocalDownloadState.Busy;
+            }
         }
-        return false;
+        return LocalDownloadState.Missing;
+    }
+    static LocalDownloadState InspectFile(string path, bool zip, bool allowEmpty = false)
+    {
+        try
+        {
+            if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0 || path.EndsWith(".partial", StringComparison.OrdinalIgnoreCase) ||
+                DateTime.UtcNow - File.GetLastWriteTimeUtc(path) < TimeSpan.FromSeconds(5)) return LocalDownloadState.Busy;
+            // A paused writer still holds write access. Refuse write sharing so
+            // an open output cannot be mistaken for a finished download.
+            using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (file.Length == 0 && !allowEmpty) return LocalDownloadState.Busy;
+            // Check ZIP end structure without expanding entries or treating a
+            // file digest as an authenticity or malware check.
+            if (zip) { using var archive = new System.IO.Compression.ZipArchive(file, System.IO.Compression.ZipArchiveMode.Read, true); }
+            return LocalDownloadState.Complete;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+        { return LocalDownloadState.Busy; }
     }
 }

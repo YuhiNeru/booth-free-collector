@@ -37,15 +37,23 @@ public sealed class Settings
     public string Category { get; set; } = "";
     public string[] DownloadCategories { get; set; } = ["clothing", "hair"];
     public bool Startup { get; set; }
-    public bool BrowserHandoff { get; set; } = true;
+    public bool BrowserHandoff { get; set; }
+    public bool DedicatedSessionEnabled { get; set; }
+    public bool SetupCompleted { get; set; }
+    public bool ShowExplanations { get; set; }
+    public bool AutoStartOfficialManager { get; set; } = true;
+    public string OfficialManagerExecutable { get; set; } = "";
     public string BrowserDownloadsFolder { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
     public string ResolveFolder(LibraryInfo? library = null)
     {
-        if (!FollowLibraryFolder) return DownloadFolder;
+        // Isolated verification fixtures retain a synthetic destination only.
+        if (Environment.GetEnvironmentVariable("BOOTH_COLLECTOR_TEST_STATE") is not null && !FollowLibraryFolder) return DownloadFolder;
         library ??= LibraryInfo.Read();
         // Absence/setup not completed is normal; a broken or busy DB is not.
         if (library.Error is not null) throw new IOException("Library Managerの設定を読み取れません: " + library.Error);
-        return library.Folder ?? DownloadFolder;
+        if (string.IsNullOrWhiteSpace(library.Folder)) throw new IOException("公式Library Managerで保存先を設定してください");
+        if (!Path.IsPathFullyQualified(library.Folder) || library.Folder.StartsWith(@"\\")) throw new IOException("公式Library Managerの保存先がローカルの絶対パスではありません");
+        return library.Folder;
     }
 }
 
@@ -55,24 +63,69 @@ public sealed class CollectorState
     public DateTimeOffset? LastSuccess { get; set; }
     public string? Etag { get; set; }
     public string? GeneratedAt { get; set; }
+    public DateTimeOffset? NextHeaderCheck { get; set; }
+    public DateTimeOffset? CatalogReadyAfter { get; set; }
     public bool BaselineCreated { get; set; }
     public HashSet<string> Seen { get; set; } = [];
     public Dictionary<string, HashSet<string>> KnownVariants { get; set; } = [];
     public List<Product> Queue { get; set; } = [];
     public Dictionary<string, SavedFile> Files { get; set; } = [];
     public Dictionary<string, BrowserPending> BrowserPending { get; set; } = [];
+    public Dictionary<string, ManagerImport> ManagerImports { get; set; } = [];
+    public List<DownloadBatch> WorkBatches { get; set; } = [];
+    public Dictionary<string, string> ProductBatches { get; set; } = [];
+    public Dictionary<string, ExpectedFreeFile[]> ExpectedFiles { get; set; } = [];
+    public Dictionary<string, string> ExpectedFileGenerations { get; set; } = [];
+    public Dictionary<string, DateTimeOffset> ProductNotBefore { get; set; } = [];
+    public DateTimeOffset? NextImportDispatch { get; set; }
+    public DateTimeOffset? InitialBatchStartedAt { get; set; }
+    public bool InitialDownloadCompleted { get; set; }
+    public HashSet<string> InitialProductIds { get; set; } = [];
     public string Status { get; set; } = "初期設定をしてください";
-    [JsonIgnore] public DateTimeOffset NextAttempt => LastAttempt?.AddHours(12) ?? DateTimeOffset.MinValue;
+    [JsonIgnore] public DateTimeOffset NextAttempt
+    {
+        get
+        {
+            var bodyDue = LastAttempt?.AddHours(12) ?? DateTimeOffset.MinValue;
+            var headerDue = CatalogReadyAfter ?? NextHeaderCheck;
+            return GeneratedAt is not null && headerDue is DateTimeOffset next && next > bodyDue ? next : bodyDue;
+        }
+    }
     public bool Due(DateTimeOffset now) => now >= NextAttempt;
+}
+public sealed class SessionStatus
+{
+    public bool NeedsLogin { get; set; } = true;
+    public DateTimeOffset? CheckedAt { get; set; }
+    public string? Runtime { get; set; }
+}
+public sealed class SessionImportVerification
+{
+    public bool Ok { get; set; }
+    public bool PagePlanVerified { get; set; }
+    public DateTimeOffset? CheckedAt { get; set; }
 }
 public sealed record SavedFile(string Path, string Sha256, long Size);
 public sealed record BrowserPending(string ProductId, string DownloadableId, string VariantId, string Name, string Url, DateTimeOffset At);
+public sealed record ManagerImport(string ProductId, string FileId, string VariantId, string Name, DateTimeOffset At, bool Confirmed = false);
+public sealed record ExpectedFreeFile(string FileId, string VariantId, string Name);
+public sealed class DownloadBatch
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public bool Initial { get; set; }
+    public string? Generation { get; set; }
+    public DateTimeOffset StartedAt { get; set; }
+    public DateTimeOffset Deadline { get; set; }
+    public DateTimeOffset? CompletedAt { get; set; }
+    public int TotalProducts { get; set; }
+}
 public sealed record DownloadCategory(string Id, string Label, string Priority, string[] Names);
 public static class DownloadCategories
 {
     public static readonly DownloadCategory[] All = [
         new("clothing", "衣装", "高", ["3D衣装", "衣装"]),
         new("hair", "髪型", "高", ["3D髪型", "髪型"]),
+        new("character", "3Dキャラクター", "中", ["3Dキャラクター"]),
         new("texture", "テクスチャ", "中", ["3Dテクスチャ", "テクスチャ"]),
         new("accessory", "装飾品", "中", ["3D装飾品", "装飾品"]),
         new("prop", "小道具", "中", ["3D小道具", "小道具"]),
