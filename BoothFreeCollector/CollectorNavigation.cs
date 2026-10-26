@@ -49,6 +49,7 @@ internal sealed class CollectorNavigation : UserControl
     readonly Panel content = new BufferedPanel { Dock = DockStyle.Fill };
     readonly List<Button> buttons = [];
     int selectedIndex = -1, requiredPage = -1;
+    internal event Action? SelectedPageChanged;
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     internal Collection<Control> TabPages { get; }
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
@@ -64,6 +65,7 @@ internal sealed class CollectorNavigation : UserControl
             TabPages[value].Visible = true; TabPages[value].BringToFront();
             content.ResumeLayout(true);
             ApplyPalette();
+            SelectedPageChanged?.Invoke();
         }
     }
     internal CollectorNavigation()

@@ -51,6 +51,7 @@ public sealed class MainForm : Form
     readonly TextBox search = new() { Width = 500, PlaceholderText = "例: 衣装 Unity(スペース区切りでAND)" };
     readonly Dictionary<string, CheckBox> categoryChecks = [];
     readonly List<Control> explanations = [];
+    readonly Label detailsHeading = new() { Text = "詳細", Dock = DockStyle.Top, Height = 42, Padding = new Padding(16, 12, 0, 0) };
     readonly Panel detailsArea = new BufferedPanel { Dock = DockStyle.Right, Width = 320, Visible = false };
     readonly FlowLayoutPanel detailsContent = new() { Dock = DockStyle.Fill, AutoScroll = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(16) };
     readonly Button explanationToggle = new CollectorButton { Name = "explanationToggle", AccessibleName = "詳細の表示切り替え", AutoSize = false, Size = new Size(120, 36), Anchor = AnchorStyles.Top | AnchorStyles.Right };
@@ -135,22 +136,35 @@ public sealed class MainForm : Form
         var b = new CollectorButton { Text = text, AutoSize = true, Padding = new Padding(12, 6, 12, 6), Margin = new Padding(0, 5, 10, 5) }; b.Click += click; return b;
     }
     static Label Label(string text) => new() { Text = text, AutoSize = true, Margin = new Padding(0, 12, 0, 4) };
-    Label Hint(string text)
+    Label Hint(int page, string text)
     {
-        var hint = new Label { Text = text, AutoSize = true, MaximumSize = new Size(280, 0), Margin = new Padding(0, 0, 0, 16) };
+        var hint = new Label { Text = text, AutoSize = true, MaximumSize = new Size(280, 0), Margin = new Padding(0, 0, 0, 16), Tag = page };
         explanations.Add(hint); detailsContent.Controls.Add(hint);
+        UpdateDetailsForCurrentPage();
         // Keep callers' layout slots empty; supplemental text lives only in
         // the dedicated details area, never inline with the main workflow.
         return new Label { Visible = false, AutoSize = false, Size = Size.Empty, Margin = Padding.Empty };
     }
     void ApplyExplanationVisibility()
     {
+        UpdateDetailsForCurrentPage();
         detailsArea.Visible = settings.ShowExplanations;
         explanationToggle.Text = settings.ShowExplanations ? "詳細:ON" : "詳細:OFF";
         explanationToggle.AccessibleDescription = settings.ShowExplanations ? "詳細エリアを非表示にします" : "詳細エリアを表示します";
     }
+    void UpdateDetailsForCurrentPage()
+    {
+        int page = tabs.SelectedIndex;
+        string title = page >= 0 && page < tabs.TabPages.Count ? tabs.TabPages[page].Text + "の詳細" : "詳細";
+        if (detailsHeading.Text != title) detailsHeading.Text = title;
+        detailsContent.SuspendLayout();
+        foreach (var hint in explanations) hint.Visible = hint.Tag is int owner && owner == page;
+        detailsContent.AutoScrollPosition = Point.Empty;
+        detailsContent.ResumeLayout(true);
+    }
     void BuildUi()
     {
+        tabs.SelectedPageChanged += UpdateDetailsForCurrentPage;
         var header = new Panel { Dock = DockStyle.Top, Width = ClientSize.Width, Height = 82, Padding = new Padding(22, 16, 22, 12) };
         header.Controls.Add(new Label { Text = "BOOTH Free Downloader", Font = new Font(Font.FontFamily, 20, FontStyle.Bold), AutoSize = true, Location = new Point(22, 23) });
         explanationToggle.Location = new Point(ClientSize.Width - 158, 24);
@@ -162,7 +176,8 @@ public sealed class MainForm : Form
         };
         header.Controls.Add(explanationToggle);
         detailsArea.Controls.Add(detailsContent);
-        detailsArea.Controls.Add(new Label { Text = "詳細", Dock = DockStyle.Top, Height = 42, Padding = new Padding(16, 12, 0, 0), Font = new Font(Font, FontStyle.Bold) });
+        detailsHeading.Font = new Font(Font, FontStyle.Bold);
+        detailsArea.Controls.Add(detailsHeading);
         detailsArea.SizeChanged += (_, _) =>
         {
             int width = Math.Max(160, detailsArea.ClientSize.Width - detailsContent.Padding.Horizontal - 12);
@@ -170,6 +185,8 @@ public sealed class MainForm : Form
         };
         Controls.Add(tabs); Controls.Add(detailsArea); Controls.Add(header);
         var overview = new BufferedPanel { Text = "ダウンロード", Padding = new Padding(28, 14, 28, 20) };
+        overview.Controls.Add(Hint(0, "待機中の商品と取得状況、次回の新着確認時刻を表示します。取得が終わった商品は待機列から外れます。"));
+        overview.Controls.Add(Hint(0, "「確認・再開」は保存済みの予定を維持して取得を再開します。「一時停止」で止められます。「過去分を追加」は保存済み一覧から追加する操作です。"));
         var overviewLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6 };
         overviewLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 64)); overviewLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
         overviewLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30)); overviewLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
@@ -207,14 +224,14 @@ public sealed class MainForm : Form
         var layout = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
         layout.Controls.Add(Label("保存先(公式Library Managerから自動取得)"));
         layout.Controls.Add(libraryFolderStatus);
-        layout.Controls.Add(Hint("保存先は公式ライブラリの設定で変更できます。変更は自動で反映されます。"));
+        layout.Controls.Add(Hint(1, "保存先は公式ライブラリの設定で変更できます。変更は自動で反映されます。"));
         layout.Controls.Add(Label("取得する商品")); layout.Controls.Add(auto); layout.Controls.Add(adult); layout.Controls.Add(existing);
         layout.Controls.Add(Label("キーワード(商品名・ショップ・タグ)")); layout.Controls.Add(search);
-        layout.Controls.Add(Hint("カテゴリは「ダウンロード対象」画面で選択できます。"));
+        layout.Controls.Add(Hint(1, "カテゴリは「ダウンロード対象」画面で選択できます。"));
         layout.Controls.Add(Label("配信URL")); layout.Controls.Add(endpoint);
         layout.Controls.Add(startup);
         layout.Controls.Add(startManager);
-        layout.Controls.Add(Hint("一覧の取得間隔は12時間です。選んだカテゴリの無料商品を、公式ライブラリで保存・展開します。"));
+        layout.Controls.Add(Hint(1, "一覧の取得間隔は12時間です。選んだカテゴリの無料商品を、公式ライブラリで保存・展開します。"));
         var save = Button("設定を保存して開始", async (_, _) => await SaveSettings());
         save.Dock = DockStyle.Bottom; save.Height = 44; primaryButtons.Add(save);
         configScroll.Controls.Add(layout); config.Controls.Add(configScroll); config.Controls.Add(save); tabs.TabPages.Add(config);
@@ -228,7 +245,7 @@ public sealed class MainForm : Form
     {
         var page = new BufferedPanel { Text = "ダウンロード対象", Padding = new Padding(28, 14, 28, 20) };
         var panel = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
-        panel.Controls.Add(Hint("初期設定は衣装・髪型のみです。チェックをすべて外すと取得しません。変更後は下のボタンで保存してください。"));
+        panel.Controls.Add(Hint(2, "初期設定は衣装・髪型のみです。チェックをすべて外すと取得しません。変更後は下のボタンで保存してください。"));
         foreach (string priority in new[] { "高", "中", "低" })
         {
             var group = new CollectorCheckBox { Text = "優先度:" + priority + "(まとめて選択)", AutoSize = true, ThreeState = true, AutoCheck = false, Margin = new Padding(0, 20, 0, 6) };
@@ -254,7 +271,7 @@ public sealed class MainForm : Form
             };
             Sync();
         }
-        panel.Controls.Add(Hint("追加したカテゴリの過去分も取得する場合は、ダウンロード画面の「過去分を追加」を選んでください。"));
+        panel.Controls.Add(Hint(2, "追加したカテゴリの過去分も取得する場合は、ダウンロード画面の「過去分を追加」を選んでください。"));
         var save = Button("対象カテゴリを保存して開始", async (_, _) => await SaveSettings());
         save.Dock = DockStyle.Bottom; primaryButtons.Add(save); page.Controls.Add(panel); page.Controls.Add(save); tabs.TabPages.Add(page);
     }
@@ -316,7 +333,8 @@ public sealed class MainForm : Form
         top.Controls.Add(new Label { Text = "メインアカウントの購入履歴や個人情報と分けるためです。\nこのアプリはログイン状態でBOOTHへアクセスするため、専用アカウントの利用でも安全を保証するものではありません。",
             ForeColor = Color.Firebrick, AutoSize = true, MaximumSize = new Size(850, 0) });
         top.Controls.Add(Label("別アカウントの利用はBOOTHの規約に従ってください。普段のChromeのログイン情報はコピーしません。"));
-        top.Controls.Add(Hint("ログイン状態は次回起動でも利用します。期限が切れたら、この画面でログインし直してください。"));
+        top.Controls.Add(Hint(3, "ログイン状態は次回起動でも利用します。期限が切れたら、この画面でログインし直してください。"));
+        top.Controls.Add(Hint(3, "工程は導入確認、ログイン、接続確認、完了の順です。水色が現在の工程、緑が完了した工程です。未完了の間はこの画面だけを表示します。"));
         var article = new LinkLabel { Text = "詳しい説明(Zenn記事):" + EmbeddedSession.ArticleUrl, AutoSize = true, Margin = new Padding(0, 5, 0, 5) };
         article.LinkClicked += (_, _) => Process.Start(new ProcessStartInfo(EmbeddedSession.ArticleUrl) { UseShellExecute = true });
         top.Controls.Add(article); top.Controls.Add(loginStatus);
@@ -761,6 +779,36 @@ public sealed class MainForm : Form
         setupOnlyImage.Save(Path.Combine(output, "setup-only.png"));
     }
 
+    internal async Task<Dictionary<string, string[]>> CaptureDetailsContextsForVerification(string output)
+    {
+        if (testRequirement is null || Environment.GetEnvironmentVariable("BOOTH_COLLECTOR_TEST_STATE") is null) throw new InvalidOperationException();
+        int previousPage = tabs.SelectedIndex;
+        bool previousDetails = settings.ShowExplanations;
+        var contexts = new Dictionary<string, string[]>();
+        try
+        {
+            tabs.SetSetupRequired(false, tabs.TabPages.Count - 1);
+            settings.ShowExplanations = true; ApplyExplanationVisibility();
+            for (int i = 0; i < tabs.TabPages.Count; i++)
+            {
+                tabs.SelectedIndex = i;
+                await Task.Delay(50);
+                if (detailsHeading.Text != tabs.TabPages[i].Text + "の詳細") throw new InvalidOperationException("Details heading does not match page");
+                contexts[tabs.TabPages[i].Text] = explanations.Where(h => h.Visible).Select(h => h.Text).ToArray();
+                using var screenshot = new Bitmap(Width, Height);
+                DrawToBitmap(screenshot, new Rectangle(0, 0, Width, Height));
+                screenshot.Save(Path.Combine(output, $"details-page-{i}.png"));
+            }
+            File.WriteAllText(Path.Combine(output, "details-contexts.json"), JsonSerializer.Serialize(contexts, Storage.Json));
+            return contexts;
+        }
+        finally
+        {
+            tabs.SelectedIndex = previousPage; settings.ShowExplanations = previousDetails;
+            RefreshSetupFlow(); ApplyExplanationVisibility();
+        }
+    }
+    internal string DetailsHeadingForVerification => detailsHeading.Text;
     internal void CloseForVerification() { exiting = true; Close(); }
     void Notify(string text) { tray.BalloonTipTitle = "BOOTH Free Downloader"; tray.BalloonTipText = text; tray.ShowBalloonTip(5000); }
     void Log(string text)

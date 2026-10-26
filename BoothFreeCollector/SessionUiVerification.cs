@@ -43,6 +43,13 @@ internal static class SessionUiVerification
                     "details toggle shows supplemental explanations only in the dedicated details area");
                 form.ToggleDetailsForVerification();
                 Check(!form.DetailsVisibleForVerification && form.DetailsLabelForVerification == "詳細:OFF", "details toggle hides the area and restores the exact OFF label");
+                var contexts = await form.CaptureDetailsContextsForVerification(output);
+                var topics = new Dictionary<string, string> { ["ダウンロード"] = "待機中の商品", ["設定"] = "保存先は公式ライブラリ", ["ダウンロード対象"] = "初期設定は衣装", ["セットアップ"] = "ログイン状態は次回" };
+                foreach (var topic in topics)
+                    Check(contexts[topic.Key].Any(t => t.Contains(topic.Value)) && topics.Where(t => t.Key != topic.Key).All(other => !contexts[topic.Key].Any(t => t.Contains(other.Value))),
+                        "details contain only the relevant explanations for " + topic.Key);
+                Check(form.SetupOnlyForVerification && form.DetailsHeadingForVerification == "セットアップの詳細" && form.DetailsLabelForVerification == "詳細:OFF",
+                    "returning to setup-only mode restores setup details and the original toggle state");
                 await form.SetPausedForVerification(true);
                 Check(!Storage.Load<Settings>("settings.json").AutoDownload, "pause button persists disabled automatic acquisition");
                 await form.SetPausedForVerification(false);

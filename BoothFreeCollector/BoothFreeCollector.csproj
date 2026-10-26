@@ -3,7 +3,7 @@
     <OutputType>WinExe</OutputType><TargetFramework>net10.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
     <AssemblyName>BoothFreeDownloader</AssemblyName><ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>3.0.5</Version>
+    <Version>3.0.6</Version>
     <ApplicationIcon>assets/app.ico</ApplicationIcon>
     <RuntimeFrameworkVersion>10.0.14</RuntimeFrameworkVersion>
   </PropertyGroup>
