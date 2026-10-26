@@ -21,6 +21,13 @@ internal static class SessionVerification
             check(restarted.Confirm(new(true, "fixture", "E:\\fixture")).Ready && !Storage.Load<OfficialManagerLauncher.LaunchStamp>("manager-launch-state.json").AwaitingConfirmation,
                 "expected official destination clears the launch guard only after verification");
         }
+        var launchNow = DateTimeOffset.UtcNow;
+        check(!OfficialManagerLauncher.WaitingForStart(new() { At = launchNow, AwaitingConfirmation = false }, launchNow),
+            "a previously confirmed Manager can restart immediately after it closes");
+        check(OfficialManagerLauncher.WaitingForStart(new() { At = launchNow, AwaitingConfirmation = true }, launchNow),
+            "an unconfirmed launch has a short duplicate-start guard");
+        check(!OfficialManagerLauncher.WaitingForStart(new() { At = launchNow.AddSeconds(-6), AwaitingConfirmation = true }, launchNow),
+            "an unsuccessful launch can retry without waiting a full minute");
         check(EmbeddedSession.AllowedNavigation("https://accounts.booth.pm/") && EmbeddedSession.AllowedNavigation("https://accounts.pixiv.net/login"), "dedicated session permits official login origins");
         foreach (var bad in new[] { "http://booth.pm/", "https://booth.pm.attacker.invalid/", "file:///C:/private", "https://booth.pm:444/", "https://user@booth.pm/", "javascript:alert(1)", "booth-library-manager://item-import?x=1" })
             check(!EmbeddedSession.AllowedNavigation(bad), "dedicated session blocks unsafe top-level navigation");

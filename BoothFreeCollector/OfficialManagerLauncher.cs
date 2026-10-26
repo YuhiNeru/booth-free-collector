@@ -1,5 +1,5 @@
 using Microsoft.Win32;
-using System.Runtime.InteropServices;
+using System.Diagnostics;
 using System.Text.RegularExpressions;
 
 namespace BoothFreeCollector;
@@ -40,25 +40,28 @@ public sealed class OfficialManagerLauncher : IDisposable
         if (running.Length > 0) { foreach (var process in running) process.Dispose(); return false; }
         var now = DateTimeOffset.UtcNow;
         var stamp = Storage.Load<LaunchStamp>("manager-launch-state.json");
-        if (now - (lastLaunch ?? stamp.At ?? DateTimeOffset.MinValue) < TimeSpan.FromMinutes(1)) return false;
+        if (WaitingForStart(stamp, now)) return false;
         string? executable = Resolve(settings);
         if (executable is null) return false;
         pendingTrust?.Dispose(); pendingTrust = OfficialExecutableTrust.OpenVerified(executable);
         expectedFolder = ExpectedFolderForLaunch(stamp, Storage.Load<ActiveLibraryDatabase.SettingsCache>("manager-settings.json").Folder);
         lastLaunch = now; Storage.Save("manager-launch-state.json", new LaunchStamp { At = now, ExpectedFolder = expectedFolder, AwaitingConfirmation = true });
-        object? shell = null;
         try
         {
-            // Launch the verified installation through the shell. The active DB
-            // and expected destination are checked again before importing.
-            var type = Type.GetTypeFromProgID("Shell.Application") ?? throw new IOException("Windowsのアプリ起動機能を確認できません");
-            shell = Activator.CreateInstance(type) ?? throw new IOException("Windowsのアプリ起動機能を確認できません");
-            ((dynamic)shell).ShellExecute(executable, "", Path.GetDirectoryName(executable)!, "open", 0);
+            // Start only the verified executable, with no URI or shell command.
+            // This also works from an MTA background worker without Shell COM.
+            using var process = Process.Start(new ProcessStartInfo(executable)
+            {
+                UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(executable)!,
+                WindowStyle = ProcessWindowStyle.Normal
+            }) ?? throw new IOException("公式ライブラリを起動できません");
             return true;
         }
         catch { pendingTrust.Dispose(); pendingTrust = null; throw new IOException("公式ライブラリを自動起動できません。公式配布版のインストール先を確認してください"); }
-        finally { if (shell is not null && Marshal.IsComObject(shell)) Marshal.FinalReleaseComObject(shell); }
     }
+    internal static bool WaitingForStart(LaunchStamp stamp, DateTimeOffset now)
+        => stamp.AwaitingConfirmation && now - (stamp.At ?? DateTimeOffset.MinValue) < TimeSpan.FromSeconds(5);
+
     public LibraryRequirement Confirm(LibraryRequirement requirement)
     {
         var stamp = Storage.Load<LaunchStamp>("manager-launch-state.json");

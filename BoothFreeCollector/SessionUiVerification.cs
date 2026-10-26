@@ -17,11 +17,12 @@ internal static class SessionUiVerification
         Storage.Save("session-import-verification.json", new SessionImportVerification { Ok = true, PagePlanVerified = true });
         bool dependencyReady = false;
         ManualResetEventSlim? dependencyGate = null;
-        int browserPid = 0;
+        int browserPid = 0, dependencyCalls = 0;
         var checks = new List<string>();
         void Check(bool ok, string name) { if (!ok) throw new Exception(name); checks.Add(name); }
         using var form = new MainForm(false, () =>
         {
+            Interlocked.Increment(ref dependencyCalls);
             dependencyGate?.Wait(TimeSpan.FromSeconds(10));
             return new(dependencyReady, dependencyReady ? "テスト用の公式ライブラリ確認" : "公式ライブラリ未確認（テスト）", Path.Combine(output, "library"));
         });
@@ -64,6 +65,23 @@ internal static class SessionUiVerification
                     await pendingDependency; dependencyGate = null;
                     Check(!form.LibraryCheckingForVerification && form.LibraryStatusForVerification.Contains("テスト用の公式ライブラリ確認"),
                         "library check replaces checking with its result as soon as dependency work finishes");
+                }
+                using (var slowProbe = new ManualResetEventSlim(false))
+                {
+                    dependencyGate = slowProbe;
+                    form.LibraryCheckTimeoutForVerification = TimeSpan.FromMilliseconds(200);
+                    try
+                    {
+                        await form.VerifyDependencyForTest();
+                        Check(!form.LibraryCheckingForVerification && form.LibraryStatusForVerification.Contains("時間がかかっています"),
+                            "a stuck dependency probe releases checking and shows a retryable timeout");
+                        int calls = Volatile.Read(ref dependencyCalls);
+                        await form.VerifyDependencyForTest();
+                        Check(Volatile.Read(ref dependencyCalls) == calls,
+                            "retrying after a timeout joins the existing probe instead of launching concurrent work");
+                    }
+                    finally { slowProbe.Set(); form.LibraryCheckTimeoutForVerification = TimeSpan.FromSeconds(15); }
+                    await form.VerifyDependencyForTest(); dependencyGate = null;
                 }
                 using (var image = new Bitmap(form.Width, form.Height))
                 { form.DrawToBitmap(image, new Rectangle(0, 0, form.Width, form.Height)); image.Save(Path.Combine(output, "login-notice.png")); }

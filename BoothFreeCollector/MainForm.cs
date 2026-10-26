@@ -23,6 +23,8 @@ public sealed class MainForm : Form
     Task? sessionInitialization;
     bool libraryReady, libraryChecking;
     Task<bool>? libraryCheckTask;
+    Task<LibraryRequirement>? libraryProbeTask;
+    internal TimeSpan LibraryCheckTimeoutForVerification = TimeSpan.FromSeconds(15);
     readonly NotifyIcon tray;
     readonly System.Windows.Forms.Timer timer = new() { Interval = 30000 };
     readonly Label status = new() { Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
@@ -350,7 +352,7 @@ public sealed class MainForm : Form
         await Task.Yield();
         try
         {
-            var requirement = await Task.Run(async () =>
+            var probe = libraryProbeTask ??= Task.Run(async () =>
             {
                 if (testRequirement is not null) return testRequirement();
                 bool started = managerLauncher.TryStart(settings);
@@ -364,6 +366,7 @@ public sealed class MainForm : Form
                 } while (true);
                 return result;
             });
+            var requirement = await probe.WaitAsync(testRequirement is null ? TimeSpan.FromSeconds(15) : LibraryCheckTimeoutForVerification);
             if (requirement.Ready && requirement.Executable is string path && settings.OfficialManagerExecutable != path)
             { settings.OfficialManagerExecutable = path; Storage.Save("settings.json", settings); }
             libraryReady = requirement.Ready;
@@ -373,6 +376,14 @@ public sealed class MainForm : Form
             if (!libraryReady) { session.Suspend(); state.Status = requirement.Message; }
             else session.Resume();
             return libraryReady;
+        }
+        catch (TimeoutException)
+        {
+            libraryReady = false; confirmedFolder = null; session.Suspend();
+            state.Status = "公式ライブラリの起動・確認に時間がかかっています。しばらくして再確認してください";
+            setupLibraryStatus.Text = "① " + state.Status;
+            setupLibraryStatus.ForeColor = CollectorTheme.Warning;
+            return false;
         }
         catch
         {
@@ -384,6 +395,7 @@ public sealed class MainForm : Form
         finally
         {
             libraryChecking = false; libraryCheckTask = null;
+            if (libraryProbeTask?.IsCompleted == true) libraryProbeTask = null;
             if (libraryCheckButton is not null) libraryCheckButton.Text = "① 公式ライブラリを確認";
             RefreshSessionActions();
         }
