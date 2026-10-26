@@ -4,10 +4,10 @@ internal static class SessionVerification
 {
     public static void Run(Action<bool, string> check)
     {
-        check(!OfficialLibraryRequirement.Evaluate(new(null, [], null), false, false).Ready, "missing official Manager blocks setup and authentication");
+        check(!OfficialLibraryRequirement.Evaluate(new(null, [], null), false, false).Ready, "missing running Manager blocks imports");
         check(!OfficialLibraryRequirement.Evaluate(new("C:\\fixture", [], null), true, false).Ready, "unsigned Manager cannot unlock setup");
-        check(!OfficialLibraryRequirement.Evaluate(new(null, [], null), true, true).Ready, "unconfigured official destination blocks setup");
-        check(!OfficialLibraryRequirement.Evaluate(new("C:\\fixture", [], "busy"), true, true).Ready, "unreadable official settings cannot unlock setup");
+        check(!OfficialLibraryRequirement.Evaluate(new(null, [], null), true, true).Ready, "unconfigured official destination blocks imports");
+        check(!OfficialLibraryRequirement.Evaluate(new("C:\\fixture", [], "busy"), true, true).Ready, "unreadable official settings cannot unlock imports");
         check(OfficialLibraryRequirement.Evaluate(new("C:\\fixture", [], null), true, true).Ready, "signed running Manager with configured local storage unlocks login");
         check(OfficialManagerLauncher.ExecutableFromCommand("\"C:\\Apps\\BOOTH Library Manager\\booth_library_manager_client.exe\" \"%1\"") == "C:\\Apps\\BOOTH Library Manager\\booth_library_manager_client.exe", "launcher extracts only the executable from a quoted protocol registration");
         foreach (var bad in new[] { "cmd.exe /c malicious", "\"C:\\Apps\\other.exe\" %1", "\\\\server\\booth_library_manager_client.exe", "C:\\Apps\\booth_library_manager_client.exe\nextra" })
@@ -28,6 +28,22 @@ internal static class SessionVerification
             "an unconfirmed launch has a short duplicate-start guard");
         check(!OfficialManagerLauncher.WaitingForStart(new() { At = launchNow.AddSeconds(-6), AwaitingConfirmation = true }, launchNow),
             "an unsuccessful launch can retry without waiting a full minute");
+        const string installedExe = @"C:\Apps\booth_library_manager_client.exe";
+        check(OfficialLibraryRequirement.EvaluateInstallation(installedExe, true).Ready,
+            "signed installed Manager unlocks initial setup without a running process or configured destination");
+        check(!OfficialLibraryRequirement.EvaluateInstallation(null, false).Ready,
+            "missing installation cannot unlock dedicated login");
+        check(!OfficialLibraryRequirement.EvaluateInstallation(installedExe, false).Ready,
+            "unsigned installed file cannot unlock dedicated login");
+        var idleSettings = new Settings { Configured = true, SetupCompleted = true, DedicatedSessionEnabled = true };
+        var idleState = new CollectorState();
+        check(!OfficialLibraryRequirement.NeedsRunningManager(idleSettings, idleState), "idle polling does not require starting Manager");
+        idleState.Queue.Add(new Product { Id = "1", AgeRating = "all_ages", Categories = ["3D衣装"] });
+        check(OfficialLibraryRequirement.NeedsRunningManager(idleSettings, idleState), "actual selected downloads require active Manager verification");
+        idleSettings.AutoDownload = false;
+        check(!OfficialLibraryRequirement.NeedsRunningManager(idleSettings, idleState), "paused acquisition cannot automatically open Manager");
+        idleSettings.AutoDownload = true; idleSettings.SetupCompleted = false;
+        check(!OfficialLibraryRequirement.NeedsRunningManager(idleSettings, idleState), "unfinished initial setup cannot start Manager for pending files");
         check(EmbeddedSession.AllowedNavigation("https://accounts.booth.pm/") && EmbeddedSession.AllowedNavigation("https://accounts.pixiv.net/login"), "dedicated session permits official login origins");
         foreach (var bad in new[] { "http://booth.pm/", "https://booth.pm.attacker.invalid/", "file:///C:/private", "https://booth.pm:444/", "https://user@booth.pm/", "javascript:alert(1)", "booth-library-manager://item-import?x=1" })
             check(!EmbeddedSession.AllowedNavigation(bad), "dedicated session blocks unsafe top-level navigation");

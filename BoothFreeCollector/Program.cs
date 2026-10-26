@@ -24,6 +24,13 @@ internal static class Program
             return;
         }
         if (args.SequenceEqual(new[] { "--retire-extension" })) { BrowserBridge.Unregister(); return; }
+        if (args.SequenceEqual(new[] { "--manager-installation-status" }))
+        {
+            using var output = Console.OpenStandardOutput();
+            var requirement = OfficialLibraryRequirement.CheckInstalled(Storage.Load<Settings>("settings.json"));
+            output.Write(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { installed_and_signed = requirement.Ready, requirement.Message }));
+            return;
+        }
         if (args.SequenceEqual(new[] { "--collector-status" }))
         {
             var saved = Storage.Load<CollectorState>("state.json"); var settings = Storage.Load<Settings>("settings.json"); var library = LibraryInfo.Read();

@@ -22,8 +22,9 @@ public sealed class MainForm : Form
     internal Func<Task>? BeforeForgetForVerification;
     Task? sessionInitialization;
     bool libraryReady, libraryChecking;
-    Task<bool>? libraryCheckTask;
-    Task<LibraryRequirement>? libraryProbeTask;
+    Task<bool>? libraryCheckTask, activeLibraryCheckTask;
+    Task<LibraryRequirement>? libraryProbeTask, installationProbeTask;
+    internal Func<LibraryRequirement>? ActiveRequirementForVerification;
     internal TimeSpan LibraryCheckTimeoutForVerification = TimeSpan.FromSeconds(15);
     readonly NotifyIcon tray;
     readonly System.Windows.Forms.Timer timer = new() { Interval = 30000 };
@@ -36,6 +37,7 @@ public sealed class MainForm : Form
     readonly Label emptyQueue = new() { Dock = DockStyle.Fill, Text = "待機中の商品はありません", TextAlign = ContentAlignment.MiddleCenter };
     (string Id, string Title, string Shop)[] displayedRows = [];
     string? confirmedFolder;
+    bool folderConfirmed;
     readonly Label libraryFolderStatus = new() { AutoSize = true, MaximumSize = new Size(850, 0) };
     readonly CheckBox auto = new CollectorCheckBox() { Text = "新着の無料ファイルを自動ダウンロード", AutoSize = true };
     readonly CheckBox adult = new CollectorCheckBox() { Text = "成人向け・年齢区分不明も対象にする（18歳以上）", AutoSize = true };
@@ -169,7 +171,13 @@ public sealed class MainForm : Form
         primaryButtons.Add(resumeButton); actions.Controls.Add(resumeButton);
         pauseButton = Button("一時停止", (_, _) => { cancellation.Cancel(); settings.AutoDownload = false; auto.Checked = false; Storage.Save("settings.json", settings); Log("自動ダウンロードを一時停止しました"); });
         actions.Controls.Add(pauseButton);
-        actions.Controls.Add(Button("保存先を開く", async (_, _) => { if (await CheckLibrary() && confirmedFolder is string path && Directory.Exists(path)) Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }); }));
+        actions.Controls.Add(Button("保存先を開く", async (_, _) =>
+        {
+            var library = await Task.Run(LibraryInfo.Read);
+            if (library.Error is null && library.Folder is string path && Directory.Exists(path))
+                Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+            else Log("保存先は取得・一覧登録の直前に確認します。公式ライブラリで設定してください");
+        }));
         actions.Controls.Add(Button("過去分を追加", async (_, _) => await QueueHistory()));
         overviewLayout.Controls.Add(actions);
         grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "待機中の商品", DataPropertyName = "Title", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill });
@@ -340,11 +348,11 @@ public sealed class MainForm : Form
         actions.Controls.Add(logoutButton);
         top.Controls.Add(actions); page.Controls.Add(session.LoginView); page.Controls.Add(top); tabs.TabPages.Add(page);
     }
-    Task<bool> CheckLibrary() => libraryCheckTask ??= CheckLibraryCore();
-    async Task<bool> CheckLibraryCore()
+    Task<bool> CheckLibrary(bool forImport = false) => forImport ? activeLibraryCheckTask ??= CheckLibraryCore(true) : libraryCheckTask ??= CheckLibraryCore(false);
+    async Task<bool> CheckLibraryCore(bool forImport)
     {
         libraryChecking = true;
-        setupLibraryStatus.Text = "① 公式ライブラリを確認中…";
+        setupLibraryStatus.Text = forImport ? "① 取得・一覧登録のため公式ライブラリと保存先を確認中…" : "① 公式ライブラリの導入・署名を確認中…";
         setupLibraryStatus.ForeColor = CollectorTheme.Muted;
         if (libraryCheckButton is not null) libraryCheckButton.Text = "確認中…";
         RefreshSessionActions();
@@ -352,9 +360,10 @@ public sealed class MainForm : Form
         await Task.Yield();
         try
         {
-            var probe = libraryProbeTask ??= Task.Run(async () =>
+            async Task<LibraryRequirement> Probe()
             {
-                if (testRequirement is not null) return testRequirement();
+                if (testRequirement is not null) return forImport ? (ActiveRequirementForVerification ?? testRequirement)() : testRequirement();
+                if (!forImport) return OfficialLibraryRequirement.CheckInstalled(settings);
                 bool started = managerLauncher.TryStart(settings);
                 var elapsed = Stopwatch.StartNew();
                 LibraryRequirement result;
@@ -365,12 +374,14 @@ public sealed class MainForm : Form
                     await Task.Delay(200);
                 } while (true);
                 return result;
-            });
+            }
+            var probe = forImport ? libraryProbeTask ??= Task.Run(Probe) : installationProbeTask ??= Task.Run(Probe);
             var requirement = await probe.WaitAsync(testRequirement is null ? TimeSpan.FromSeconds(15) : LibraryCheckTimeoutForVerification);
             if (requirement.Ready && requirement.Executable is string path && settings.OfficialManagerExecutable != path)
             { settings.OfficialManagerExecutable = path; Storage.Save("settings.json", settings); }
             libraryReady = requirement.Ready;
-            confirmedFolder = requirement.Ready ? requirement.Folder : null;
+            if (forImport) confirmedFolder = requirement.Ready ? requirement.Folder : null;
+            folderConfirmed = forImport && requirement.Ready;
             setupLibraryStatus.Text = "① " + requirement.Message;
             setupLibraryStatus.ForeColor = libraryReady ? CollectorTheme.Success : CollectorTheme.Warning;
             if (!libraryReady) { session.Suspend(); state.Status = requirement.Message; }
@@ -379,7 +390,7 @@ public sealed class MainForm : Form
         }
         catch (TimeoutException)
         {
-            libraryReady = false; confirmedFolder = null; session.Suspend();
+            libraryReady = false; confirmedFolder = null; folderConfirmed = false; session.Suspend();
             state.Status = "公式ライブラリの起動・確認に時間がかかっています。しばらくして再確認してください";
             setupLibraryStatus.Text = "① " + state.Status;
             setupLibraryStatus.ForeColor = CollectorTheme.Warning;
@@ -387,15 +398,16 @@ public sealed class MainForm : Form
         }
         catch
         {
-            libraryReady = false; confirmedFolder = null; session.Suspend();
+            libraryReady = false; confirmedFolder = null; folderConfirmed = false; session.Suspend();
             setupLibraryStatus.Text = "① 公式ライブラリを確認できません。もう一度確認してください";
             setupLibraryStatus.ForeColor = CollectorTheme.Warning;
             throw;
         }
         finally
         {
-            libraryChecking = false; libraryCheckTask = null;
-            if (libraryProbeTask?.IsCompleted == true) libraryProbeTask = null;
+            libraryChecking = false;
+            if (forImport) { activeLibraryCheckTask = null; if (libraryProbeTask?.IsCompleted == true) libraryProbeTask = null; }
+            else { libraryCheckTask = null; if (installationProbeTask?.IsCompleted == true) installationProbeTask = null; }
             if (libraryCheckButton is not null) libraryCheckButton.Text = "① 公式ライブラリを確認";
             RefreshSessionActions();
         }
@@ -449,9 +461,13 @@ public sealed class MainForm : Form
             if (!session.Ready) { await EnsureSession(); if (settings.DedicatedSessionEnabled) await session.CheckLoginAsync(cancellation.Token); }
             if (session.NeedsLogin) { state.Status = "アプリ内のログインを確認してください"; return; }
             if (state.Due(DateTimeOffset.UtcNow)) await feed.Fetch(settings, state, cancellation.Token);
-            if (settings.SetupCompleted && session.Ready && !session.NeedsLogin) await downloadQueue.StepAsync(settings, state, cancellation.Token);
-            else state.Status = "初回セットアップで専用アカウントのログインを完了してください";
-            if (state.Queue.All(p => !p.Matches(settings))) state.Status = "取得完了。次の新着確認まで待機しています";
+            if (OfficialLibraryRequirement.NeedsRunningManager(settings, state))
+            {
+                if (!await CheckLibrary(forImport: true)) return;
+                await downloadQueue.StepAsync(settings, state, cancellation.Token);
+            }
+            else if (!settings.AutoDownload) state.Status = "自動ダウンロードを一時停止しています";
+            if (settings.AutoDownload && state.Queue.All(p => !p.Matches(settings))) state.Status = "取得完了。次の新着確認まで待機しています";
         }
         catch (OperationCanceledException) { state.Status = "一時停止しました"; }
         catch (IOException ex) { state.Status = ex.Message; }
@@ -477,8 +493,8 @@ public sealed class MainForm : Form
             if (deadline < now) scheduleText += "　期限超過：取得結果を確認中";
         }
         if (schedule.Text != scheduleText) schedule.Text = scheduleText;
-        folderLabel.Text = confirmedFolder is null ? "保存先を確認しています" : "保存先: " + confirmedFolder;
-        libraryFolderStatus.Text = confirmedFolder is null ? "公式ライブラリの設定を確認してください" : confirmedFolder;
+        folderLabel.Text = folderConfirmed ? "保存先: " + confirmedFolder : "保存先: 取得・一覧登録の直前に公式設定を確認します";
+        libraryFolderStatus.Text = folderConfirmed ? confirmedFolder : "公式ライブラリで指定します（取得・一覧登録の直前に確認）";
         var rows = state.Queue.Where(p => p.Matches(settings)).ToList();
         var keys = rows.Select(p => (p.Id, p.Title, p.Shop)).ToArray();
         if (!keys.SequenceEqual(displayedRows))
@@ -515,6 +531,11 @@ public sealed class MainForm : Form
     {
         if (testRequirement is null || Environment.GetEnvironmentVariable("BOOTH_COLLECTOR_TEST_STATE") is null) throw new InvalidOperationException();
         if (await CheckLibrary()) await EnsureSession();
+    }
+    internal Task<bool> VerifyImportDependencyForTest()
+    {
+        if (testRequirement is null || Environment.GetEnvironmentVariable("BOOTH_COLLECTOR_TEST_STATE") is null) throw new InvalidOperationException();
+        return CheckLibrary(forImport: true);
     }
     internal void ShowLoginForVerification() { tabs.SelectedIndex = tabs.TabPages.Count - 1; ShowApp(); }
     internal bool LogoutAvailableForVerification => logoutButton?.Enabled == true;

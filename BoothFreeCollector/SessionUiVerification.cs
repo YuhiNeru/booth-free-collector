@@ -17,7 +17,7 @@ internal static class SessionUiVerification
         Storage.Save("session-import-verification.json", new SessionImportVerification { Ok = true, PagePlanVerified = true });
         bool dependencyReady = false;
         ManualResetEventSlim? dependencyGate = null;
-        int browserPid = 0, dependencyCalls = 0;
+        int browserPid = 0, dependencyCalls = 0, activeChecks = 0;
         var checks = new List<string>();
         void Check(bool ok, string name) { if (!ok) throw new Exception(name); checks.Add(name); }
         using var form = new MainForm(false, () =>
@@ -26,6 +26,8 @@ internal static class SessionUiVerification
             dependencyGate?.Wait(TimeSpan.FromSeconds(10));
             return new(dependencyReady, dependencyReady ? "テスト用の公式ライブラリ確認" : "公式ライブラリ未確認（テスト）", Path.Combine(output, "library"));
         });
+        form.ActiveRequirementForVerification = () =>
+        { Interlocked.Increment(ref activeChecks); return new(true, "テスト用の公式保存先確認", Path.Combine(output, "library")); };
         form.Shown += async (_, _) =>
         {
             try
@@ -40,6 +42,9 @@ internal static class SessionUiVerification
                 dependencyReady = true; await form.VerifyDependencyForTest();
                 for (int n = 0; n < 200 && !session.Ready; n++) await Task.Delay(100);
                 Check(session.Ready, "real WebView2 initializes in an isolated app profile");
+                Check(activeChecks == 0, "installation checks and dedicated login preparation never request running-Manager verification");
+                Check(await form.VerifyImportDependencyForTest() && activeChecks == 1,
+                    "actual import explicitly requests separate live-Manager and destination verification");
                 Check(await form.ActivateForVerification(), "reopening an existing tray instance restores its window without reinitializing setup");
                 Check(!session.Worker.Visible && !session.Worker.TabStop, "background retrieval view is hidden from the app's visible controls and keyboard navigation");
                 Check(Path.GetFullPath(session.Worker.CoreWebView2.Environment.UserDataFolder) == session.ProfileFolder, "profile is the test-specific folder, never Chrome's profile");

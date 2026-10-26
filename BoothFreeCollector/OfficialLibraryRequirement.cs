@@ -12,6 +12,27 @@ public static class OfficialLibraryRequirement
             return new(false, "公式Managerの設定で、ローカルの保存先を指定してください");
         return new(true, "公式Manager・署名・保存先を確認しました: " + library.Folder, library.Folder);
     }
+    public static LibraryRequirement EvaluateInstallation(string? executable, bool signed)
+    {
+        if (string.IsNullOrEmpty(executable) || OfficialManagerLauncher.ExecutableFromCommand("\"" + executable + "\"") is null)
+            return new(false, "公式BOOTH Library Managerをインストールしてください");
+        if (!signed) return new(false, "公式ライブラリの署名を確認できません。公式配布版を使用してください");
+        return new(true, "公式ライブラリの導入・署名を確認しました（起動しません）", Executable: executable);
+    }
+    public static LibraryRequirement CheckInstalled(Settings settings)
+    {
+        // Resolve verifies the installed file. No process creation or live DB
+        // is needed to unlock the dedicated login during initial setup.
+        try
+        {
+            string? path = OfficialManagerLauncher.Resolve(settings);
+            return EvaluateInstallation(path, path is not null);
+        }
+        catch { return new(false, "公式ライブラリの導入・署名を確認できません"); }
+    }
+    public static bool NeedsRunningManager(Settings settings, CollectorState state)
+        => settings.Configured && settings.SetupCompleted && settings.DedicatedSessionEnabled && settings.AutoDownload &&
+            (state.Queue.Any(p => p.Matches(settings)) || state.ManagerImports.Values.Any(r => !r.Confirmed));
     public static LibraryRequirement Check()
     {
         string executable;
