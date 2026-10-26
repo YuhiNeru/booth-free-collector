@@ -48,7 +48,7 @@ internal sealed class CollectorNavigation : UserControl
     readonly FlowLayoutPanel links = new() { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
     readonly Panel content = new BufferedPanel { Dock = DockStyle.Fill };
     readonly List<Button> buttons = [];
-    int selectedIndex = -1;
+    int selectedIndex = -1, requiredPage = -1;
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     internal Collection<Control> TabPages { get; }
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
@@ -57,7 +57,7 @@ internal sealed class CollectorNavigation : UserControl
         get => selectedIndex;
         set
         {
-            if (value == selectedIndex || value < 0 || value >= TabPages.Count) return;
+            if (value == selectedIndex || value < 0 || value >= TabPages.Count || requiredPage >= 0 && value != requiredPage) return;
             content.SuspendLayout();
             if (selectedIndex >= 0) TabPages[selectedIndex].Visible = false;
             selectedIndex = value;
@@ -84,15 +84,33 @@ internal sealed class CollectorNavigation : UserControl
         buttons.Add(button); links.Controls.Add(button);
         if (selectedIndex < 0) SelectedIndex = 0;
     }
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    internal bool SetupOnly => requiredPage >= 0 && !rail.Visible && buttons.Where((_, i) => i != requiredPage).All(b => !b.Enabled);
+    internal void SetSetupRequired(bool required, int setupIndex)
+    {
+        if (setupIndex < 0 || setupIndex >= TabPages.Count) return;
+        int next = required ? setupIndex : -1;
+        if (requiredPage == next) return;
+        SuspendLayout();
+        requiredPage = next;
+        if (required) SelectedIndex = setupIndex;
+        rail.Visible = !required;
+        ApplyPalette();
+        ResumeLayout(true);
+    }
     internal void ApplyPalette()
     {
         rail.BackColor = Color.FromArgb(18, 28, 38); links.BackColor = rail.BackColor;
         for (int i = 0; i < buttons.Count; i++)
         {
             var button = buttons[i];
+            bool available = requiredPage < 0 || requiredPage == i;
+            button.Enabled = available; button.TabStop = available;
+            button.AccessibleDescription = available ? "画面を開きます" : "セットアップ完了後に利用できます";
+            button.Cursor = available ? Cursors.Hand : Cursors.Default;
             button.UseVisualStyleBackColor = false; button.FlatAppearance.BorderSize = 0;
             button.BackColor = i == selectedIndex ? Color.FromArgb(25, 52, 73) : rail.BackColor;
-            button.ForeColor = i == selectedIndex ? CollectorTheme.Text : CollectorTheme.Muted;
+            button.ForeColor = !available ? Color.FromArgb(91, 109, 124) : i == selectedIndex ? CollectorTheme.Text : CollectorTheme.Muted;
             button.FlatAppearance.MouseOverBackColor = Color.FromArgb(29, 46, 61);
             button.FlatAppearance.MouseDownBackColor = Color.FromArgb(25, 52, 73);
         }

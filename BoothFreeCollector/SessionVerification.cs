@@ -28,6 +28,10 @@ internal static class SessionVerification
             "an unconfirmed launch has a short duplicate-start guard");
         check(!OfficialManagerLauncher.WaitingForStart(new() { At = launchNow.AddSeconds(-6), AwaitingConfirmation = true }, launchNow),
             "an unsuccessful launch can retry without waiting a full minute");
+        check(SetupFlow.Stage(false, false, false, false) == SetupStage.Installation, "setup begins with installation confirmation");
+        check(SetupFlow.Stage(true, false, false, false) == SetupStage.Login, "verified installation points to login next");
+        check(SetupFlow.Stage(true, false, true, false) == SetupStage.Connection, "connection confirmation lights its own stage when requested");
+        check(SetupFlow.Stage(true, true, true, true) == SetupStage.Complete, "only verified completed setup lights the final stage");
         const string installedExe = @"C:\Apps\booth_library_manager_client.exe";
         check(OfficialLibraryRequirement.EvaluateInstallation(installedExe, true).Ready,
             "signed installed Manager unlocks initial setup without a running process or configured destination");

@@ -1,4 +1,4 @@
-# v3.0.4のセキュリティ設計
+# v3.0.5のセキュリティ設計
 
 ## 認証を扱う場所
 
@@ -48,9 +48,9 @@ VPS巡回・カタログ本文取得の12時間ゲートは通信前に保存し
 
 拡張向け登録を解除し、Native MessagingやローカルHTTPで外部から認証付き処理を要求できるサーバーは起動しません。旧版の互換・オフライン検証用補助コードが残る場合も、本番の取得経路には使いません。
 
-- [Microsoft：WebView2のセキュリティ](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/security)
-- [Microsoft：WebView2のユーザーデータ](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/user-data-folder)
-- [Microsoft：署名検証オプション](https://learn.microsoft.com/en-us/windows/win32/api/wintrust/ns-wintrust-wintrust_data)
+- [Microsoft:WebView2のセキュリティ](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/security)
+- [Microsoft:WebView2のユーザーデータ](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/user-data-folder)
+- [Microsoft:署名検証オプション](https://learn.microsoft.com/en-us/windows/win32/api/wintrust/ns-wintrust-wintrust_data)
 - [pixivサービス共通規約](https://policies.pixiv.net/)
 
 ## 設定と画面の分離
@@ -62,3 +62,5 @@ VPS巡回・カタログ本文取得の12時間ゲートは通信前に保存し
 複数バリエーションが同じ無料ファイルを参照する場合は、同一の商品・ファイルIDとして一度だけ計画します。異なるファイルIDが同名ファイルへ衝突する場合は引き続き拒否します。
 
 本アプリの配布実行ファイルにはコード署名がありません。公式Managerの署名検証は、本アプリ自身の署名や安全性を保証するものではありません。
+
+セットアップが未完了の間は専用画面だけを表示し、通常メニューの選択とプログラムからの画面切り替えも拒否します。導入・認証・現行保存先の検証は取得側でも継続します。補足説明の専用エリアは「詳細:OFF」「詳細:ON」で切り替え、既定は非表示です。本人への赤い注意と必要な操作案内は常時表示します。

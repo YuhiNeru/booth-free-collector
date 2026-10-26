@@ -73,7 +73,7 @@ public sealed class OfficialManagerLauncher : IDisposable
         }
         pendingTrust?.Dispose(); pendingTrust = null;
         if (!string.IsNullOrEmpty(expectedFolder) && !string.Equals(expectedFolder, requirement.Folder, StringComparison.OrdinalIgnoreCase))
-            return new(false, "自動起動後の保存先が前回と異なります。公式Managerの保存先を確認してください（前回: " + expectedFolder + "）");
+            return new(false, "自動起動後の保存先が前回と異なります。公式Managerの保存先を確認してください(前回: " + expectedFolder + ")");
         expectedFolder = null;
         if (stamp.AwaitingConfirmation) { stamp.AwaitingConfirmation = false; stamp.ExpectedFolder = null; Storage.Save("manager-launch-state.json", stamp); }
         return requirement;

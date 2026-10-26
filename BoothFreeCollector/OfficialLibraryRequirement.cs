@@ -17,7 +17,7 @@ public static class OfficialLibraryRequirement
         if (string.IsNullOrEmpty(executable) || OfficialManagerLauncher.ExecutableFromCommand("\"" + executable + "\"") is null)
             return new(false, "公式BOOTH Library Managerをインストールしてください");
         if (!signed) return new(false, "公式ライブラリの署名を確認できません。公式配布版を使用してください");
-        return new(true, "公式ライブラリの導入・署名を確認しました（起動しません）", Executable: executable);
+        return new(true, "公式ライブラリの導入・署名を確認しました(起動しません)", Executable: executable);
     }
     public static LibraryRequirement CheckInstalled(Settings settings)
     {

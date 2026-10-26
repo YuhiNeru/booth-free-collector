@@ -24,7 +24,7 @@ internal static class SessionUiVerification
         {
             Interlocked.Increment(ref dependencyCalls);
             dependencyGate?.Wait(TimeSpan.FromSeconds(10));
-            return new(dependencyReady, dependencyReady ? "テスト用の公式ライブラリ確認" : "公式ライブラリ未確認（テスト）", Path.Combine(output, "library"));
+            return new(dependencyReady, dependencyReady ? "テスト用の公式ライブラリ確認" : "公式ライブラリ未確認(テスト)", Path.Combine(output, "library"));
         });
         form.ActiveRequirementForVerification = () =>
         { Interlocked.Increment(ref activeChecks); return new(true, "テスト用の公式保存先確認", Path.Combine(output, "library")); };
@@ -35,6 +35,14 @@ internal static class SessionUiVerification
                 var session = form.VerificationSession;
                 await Task.Delay(200);
                 Check(!session.Ready && !Directory.Exists(session.ProfileFolder), "missing official Manager does not initialize a login profile or start authentication");
+                Check(form.SetupStageForVerification == SetupStage.Installation, "missing installation keeps the first setup lamp active");
+                Check(form.SetupOnlyForVerification && !form.TryOtherPageForVerification(), "unfinished setup shows only setup and rejects other page navigation");
+                Check(!form.DetailsVisibleForVerification && form.DetailsLabelForVerification == "詳細:OFF", "details area is hidden by default with the exact OFF label");
+                form.ToggleDetailsForVerification();
+                Check(form.DetailsVisibleForVerification && form.DetailsLabelForVerification == "詳細:ON" && form.ExplanationsInDetailsForVerification,
+                    "details toggle shows supplemental explanations only in the dedicated details area");
+                form.ToggleDetailsForVerification();
+                Check(!form.DetailsVisibleForVerification && form.DetailsLabelForVerification == "詳細:OFF", "details toggle hides the area and restores the exact OFF label");
                 await form.SetPausedForVerification(true);
                 Check(!Storage.Load<Settings>("settings.json").AutoDownload, "pause button persists disabled automatic acquisition");
                 await form.SetPausedForVerification(false);
@@ -42,6 +50,8 @@ internal static class SessionUiVerification
                 dependencyReady = true; await form.VerifyDependencyForTest();
                 for (int n = 0; n < 200 && !session.Ready; n++) await Task.Delay(100);
                 Check(session.Ready, "real WebView2 initializes in an isolated app profile");
+                Check(form.SetupStageForVerification == SetupStage.Login && form.SetupButtonForVerification.Contains("ログイン画面"),
+                    "installation success points to one clear login action");
                 Check(activeChecks == 0, "installation checks and dedicated login preparation never request running-Manager verification");
                 Check(await form.VerifyImportDependencyForTest() && activeChecks == 1,
                     "actual import explicitly requests separate live-Manager and destination verification");
@@ -71,6 +81,22 @@ internal static class SessionUiVerification
                     Check(!form.LibraryCheckingForVerification && form.LibraryStatusForVerification.Contains("テスト用の公式ライブラリ確認"),
                         "library check replaces checking with its result as soon as dependency work finishes");
                 }
+                using (var quietProbe = new ManualResetEventSlim(false))
+                {
+                    dependencyGate = quietProbe;
+                    string previousStatus = form.LibraryStatusForVerification, previousButton = form.SetupButtonForVerification;
+                    int revision = form.SetupRevisionForVerification;
+                    Task backgroundCheck = form.VerifyDependencyForTest(showProgress: false);
+                    try
+                    {
+                        await Task.Delay(100);
+                        Check(form.LibraryStatusForVerification == previousStatus && form.SetupButtonForVerification == previousButton &&
+                            form.SetupRevisionForVerification == revision && form.SetupButtonEnabledForVerification,
+                            "background installation checks do not flash status, disable the next action or relight setup lamps");
+                    }
+                    finally { quietProbe.Set(); }
+                    await backgroundCheck; dependencyGate = null;
+                }
                 using (var slowProbe = new ManualResetEventSlim(false))
                 {
                     dependencyGate = slowProbe;
@@ -98,6 +124,8 @@ internal static class SessionUiVerification
                 var loginLoaded = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 login.NavigationCompleted += (_, e) => loginLoaded.TrySetResult(e.IsSuccess && e.HttpStatusCode == 200);
                 await form.InvokeSetupForVerification(false);
+                Check(form.SetupStageForVerification == SetupStage.Login && form.SetupButtonForVerification.Contains("接続を確認"),
+                    "opening the login view keeps the login lamp active and changes the same primary button to connection confirmation");
                 Check(!Storage.Load<Settings>("settings.json").SetupCompleted && !Storage.Load<SessionImportVerification>("session-import-verification.json").Ok,
                     "starting login invalidates stale setup and prior-account import proof");
                 Check(await loginLoaded.Task.WaitAsync(TimeSpan.FromSeconds(15)) && login.Source == "https://booth.pm/users/sign_in",
@@ -129,6 +157,14 @@ internal static class SessionUiVerification
                 Check(!await session.CheckLoginAsync(CancellationToken.None), "a status-200 access challenge at the library URL cannot complete setup");
                 libraryChallenge = false;
                 Check(await session.CheckLoginAsync(CancellationToken.None), "authenticated library document is verified before setup can continue");
+                form.SetCompletionForVerification(true);
+                Check(form.SetupStageForVerification == SetupStage.Complete && !session.LoginView.Visible && form.SetupButtonForVerification.Contains("ダウンロード"),
+                    "completed setup lights the final lamp, hides the login page and offers the download screen");
+                using (var completedImage = new Bitmap(form.Width, form.Height))
+                { form.DrawToBitmap(completedImage, new Rectangle(0, 0, form.Width, form.Height)); completedImage.Save(Path.Combine(output, "setup-complete.png")); }
+                Check(!form.SetupOnlyForVerification && form.TryOtherPageForVerification(), "verified setup completion restores normal navigation");
+                form.SetCompletionForVerification(false);
+                Check(form.SetupOnlyForVerification && !form.TryOtherPageForVerification(), "invalidated setup returns to the dedicated setup screen");
                 var cookies = core.CookieManager;
                 var fixtureCookie = cookies.CreateCookie("collector_fixture", "synthetic-only", ".booth.pm", "/"); fixtureCookie.IsSecure = true; fixtureCookie.IsHttpOnly = true;
                 cookies.AddOrUpdateCookie(fixtureCookie);
@@ -177,7 +213,7 @@ internal static class SessionUiVerification
             // cleanup must work without performing a login or a network fetch.
             try { using var browser = System.Diagnostics.Process.GetProcessById(browserPid); if (!browser.WaitForExit(10000)) throw new IOException("Fixture browser did not close"); }
             catch (ArgumentException) { }
-            using var cleanup = new MainForm(false, () => new(false, "公式ライブラリ未確認（テスト）"));
+            using var cleanup = new MainForm(false, () => new(false, "公式ライブラリ未確認(テスト)"));
             cleanup.BeforeForgetForVerification = async () => Check(
                 (await cleanup.VerificationSession.Worker.CoreWebView2.CookieManager.GetCookiesAsync("https://booth.pm")).Any(c => c.Name == "cold_cleanup_fixture"),
                 "cold cleanup starts with a fixture cookie actually persisted across browser restart");
